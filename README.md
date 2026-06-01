@@ -128,6 +128,45 @@ npm start       # Arrancar servidor MCP manualmente
 
 ---
 
+## Troubleshooting
+
+### `Error: No active session found. Run 'npm run auth'...`
+
+El server **no encuentra un token válido**. Dos causas posibles:
+
+**1. La sesión ha caducado** (refresh token expirado o revocado). Vuelve a autenticarte:
+
+```bash
+cd /ruta/al/proyecto
+npm run auth      # completa el login en el navegador
+```
+
+Después **reinicia Claude Code** (o el proceso del server MCP) para que recargue la sesión.
+
+**2. El server busca el token en el directorio equivocado** 🐛 *(bug histórico — ya corregido)*
+
+Claude Code lanza el server MCP desde un **CWD arbitrario** (normalmente el `$HOME` del usuario), **no** desde la carpeta del proyecto. Si `TOKEN_CACHE_PATH` en `.env` es una **ruta relativa** (`.token_cache.json`), el server la resuelve contra ese CWD y nunca encuentra el token que escribió `npm run auth` (que sí corre desde el proyecto). Resultado: **`npm run auth` funciona, pero el server siempre responde *"No active session found"*.**
+
+**Solución aplicada:**
+- El código (`src/index.ts` y `src/auth.ts`) ahora resuelve cualquier ruta relativa de `TOKEN_CACHE_PATH` contra la **raíz del proyecto**, no contra el CWD.
+- Además se recomienda usar **ruta absoluta** en `.env`:
+
+```env
+TOKEN_CACHE_PATH=/Users/tu-usuario/ruta/al/proyecto/.token_cache.json
+```
+
+> 💡 **Diagnóstico rápido:** si `npm run auth` termina con éxito pero el server sigue fallando, casi seguro es este problema de ruta/CWD. Comprueba dónde está realmente el `.token_cache.json` y desde qué directorio se lanza el server (`args` en `~/.claude.json`).
+
+### Verificar la sesión sin pasar por Claude
+
+```bash
+node -e 'require("dotenv").config({path:".env"});const{PublicClientApplication}=require("@azure/msal-node");const fs=require("fs");const P=process.env.TOKEN_CACHE_PATH;const cp={beforeCacheAccess:async c=>{if(fs.existsSync(P))c.tokenCache.deserialize(fs.readFileSync(P,"utf-8"))},afterCacheAccess:async()=>{}};(async()=>{const a=new PublicClientApplication({auth:{clientId:process.env.CLIENT_ID,authority:`https://login.microsoftonline.com/${process.env.TENANT_ID}`},cache:{cachePlugin:cp}});const acc=await a.getTokenCache().getAllAccounts();console.log("Cuentas:",acc.map(x=>x.username));})()'
+```
+
+Si imprime tu cuenta, la sesión es válida y el problema está en la ruta/CWD del server.
+
+---
+
 ## Estructura del proyecto
 
 ```

@@ -68,3 +68,29 @@ Registro global en ~/.claude.json bajo el nombre "m365-personal-suite"
 | Sites.ReadWrite.All | SharePoint |
 | Chat.ReadWrite | Chat Teams |
 | MailboxSettings.ReadWrite | Configuración buzón |
+
+---
+
+## Problemas conocidos y fixes posteriores
+
+### Fix (jun 2026) — `No active session found` por ruta relativa del token cache
+
+**Síntoma:** `npm run auth` completa el login con éxito y escribe `.token_cache.json`, pero todas
+las herramientas del server (p.ej. `get_latest_emails`) devuelven
+`Error: No active session found. Run 'npm run auth'...`.
+
+**Causa raíz:** Claude Code lanza el server MCP (`dist/index.js`) desde un **CWD arbitrario**
+(normalmente el `$HOME` del usuario), no desde la carpeta del proyecto. El `.env` definía
+`TOKEN_CACHE_PATH=.token_cache.json` (ruta **relativa**), así que:
+- `npm run auth` (ejecutado desde el proyecto) escribía el token en `proyecto/.token_cache.json`. ✅
+- El server (ejecutado desde `$HOME`) buscaba `~/.token_cache.json`, que no existe → sin cuentas en
+  cache → `acquireTokenSilent` no se intenta → "No active session". ❌
+
+**Fix aplicado:**
+1. `src/index.ts` y `src/auth.ts` resuelven `TOKEN_CACHE_PATH` a ruta **absoluta** anclada a la raíz
+   del proyecto (`path.join(__dirname, "..")`) cuando se recibe una ruta relativa.
+2. `.env` y `.env.example` recomiendan usar ruta **absoluta** de forma explícita.
+3. Documentado en `README.md` (sección Troubleshooting) y en `docs/como-conectar-claude-m365.html`.
+
+**Lección:** en cualquier server MCP, nunca dependas del CWD. Toda ruta de fichero (token cache,
+descargas, logs) debe resolverse contra `__dirname` o ser absoluta.

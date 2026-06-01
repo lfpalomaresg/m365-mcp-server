@@ -3,3 +3,5 @@ dist/
 .env
 .token_cache.json
 *.js.map
+.DS_Store
+.claude/

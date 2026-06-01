@@ -637,6 +637,16 @@ npm run build</code></pre>
         <div class="problem-solution"><strong>Resultado:</strong> Autenticación completada, token guardado en caché, servidor MCP operativo y registrado globalmente en Claude Code.</div>
       </div>
 
+      <div class="problem-card warning">
+        <div class="problem-header">
+          <span class="problem-badge">Fix · Jun 2026</span>
+          <span class="problem-title">"No active session found" pese a haber autenticado con éxito</span>
+        </div>
+        <p class="problem-desc">Semanas después, todas las herramientas (p.ej. <code>get_latest_emails</code>) empezaron a devolver <em>"No active session found. Run 'npm run auth'"</em>. Lo desconcertante: <code>npm run auth</code> completaba el login correctamente y escribía el token, pero el server seguía sin verlo.</p>
+        <div class="problem-solution"><strong>Causa raíz:</strong> Claude Code lanza el server MCP desde un <strong>CWD arbitrario</strong> (el <code>$HOME</code> del usuario), no desde la carpeta del proyecto. Con <code>TOKEN_CACHE_PATH=.token_cache.json</code> (ruta <strong>relativa</strong>), <code>npm run auth</code> escribía el token en <code>proyecto/.token_cache.json</code> pero el server lo buscaba en <code>~/.token_cache.json</code> → nunca lo encontraba.</p>
+        <div class="problem-solution" style="margin-top:10px"><strong>Solución:</strong> el código resuelve ahora <code>TOKEN_CACHE_PATH</code> a ruta <strong>absoluta</strong> anclada a la raíz del proyecto (<code>__dirname/..</code>), y se recomienda definir una ruta absoluta en <code>.env</code>. Regla general: <em>un server MCP nunca debe depender del CWD</em>.</div>
+      </div>
+
     </div>
   </section>
 
@@ -722,6 +732,11 @@ npm run build</code></pre>
           <td>Auth flow</td>
           <td>PKCE con servidor HTTP local</td>
           <td>Device Code Flow con cuentas en tenant corporativo</td>
+        </tr>
+        <tr>
+          <td>TOKEN_CACHE_PATH</td>
+          <td>Ruta <strong>absoluta</strong> (o resuelta contra <code>__dirname</code>)</td>
+          <td>Ruta relativa → el server la busca en el CWD equivocado</td>
         </tr>
       </tbody>
     </table>

@@ -13,7 +13,16 @@ dotenv.config({ path: path.join(__dirname, "../.env") });
 
 const CLIENT_ID = process.env.CLIENT_ID ?? "1950a258-227b-4e31-a9cf-717495945fc2";
 const TENANT_ID = process.env.TENANT_ID ?? "common";
-const TOKEN_CACHE_PATH = process.env.TOKEN_CACHE_PATH ?? path.join(__dirname, "../.token_cache.json");
+
+// Raíz del proyecto (un nivel por encima de dist/). Claude Code arranca este server desde
+// un CWD arbitrario (normalmente el HOME del usuario), así que NUNCA hay que confiar en rutas
+// relativas al CWD: una ruta relativa en .env haría que el token no se encuentre y el server
+// respondería "No active session found" aunque la sesión exista. Por eso resolvemos siempre
+// TOKEN_CACHE_PATH a una ruta absoluta anclada a la raíz del proyecto. (Bug histórico, ver README.)
+const PROJECT_ROOT = path.join(__dirname, "..");
+const resolveFromRoot = (p: string) => (path.isAbsolute(p) ? p : path.join(PROJECT_ROOT, p));
+
+const TOKEN_CACHE_PATH = resolveFromRoot(process.env.TOKEN_CACHE_PATH ?? ".token_cache.json");
 const DOWNLOAD_PATH = process.env.DOWNLOAD_PATH ?? path.join(process.env.HOME ?? "~", "Downloads", "m365-mcp");
 
 const GRAPH_SCOPES = [
