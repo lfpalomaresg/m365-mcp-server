@@ -3,7 +3,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { PublicClientApplication, type ICachePlugin, type TokenCacheContext } from "@azure/msal-node";
-import { Client } from "@microsoft/microsoft-graph-client";
+import { Client, ResponseType } from "@microsoft/microsoft-graph-client";
 import "isomorphic-fetch";
 import * as dotenv from "dotenv";
 import * as fs from "fs";
@@ -119,25 +119,22 @@ async function downloadOneDriveFile(args: { file_id: string; file_name?: string 
   const ext = path.extname(name).toLowerCase();
   const textTypes = [".txt", ".md", ".json", ".csv", ".html", ".xml", ".ts", ".js", ".py", ".yaml", ".toml"];
 
+  // /content bajo fetch/undici devuelve un web ReadableStream (sin .pipe); pedimos
+  // ARRAYBUFFER para no mezclar web streams con Node streams.
+  const raw = await client
+    .api(`/me/drive/items/${args.file_id}/content`)
+    .responseType(ResponseType.ARRAYBUFFER)
+    .get();
+  const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayBuffer);
+
   if (textTypes.includes(ext)) {
-    const stream = await client.api(`/me/drive/items/${args.file_id}/content`).getStream();
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    }
-    return { name, type: "text", content: Buffer.concat(chunks).toString("utf-8") };
+    return { name, type: "text", content: buf.toString("utf-8") };
   }
 
   if (!fs.existsSync(DOWNLOAD_PATH)) fs.mkdirSync(DOWNLOAD_PATH, { recursive: true });
   const dest = path.join(DOWNLOAD_PATH, name);
-  const stream = await client.api(`/me/drive/items/${args.file_id}/content`).getStream();
-  await new Promise<void>((resolve, reject) => {
-    const ws = fs.createWriteStream(dest);
-    stream.pipe(ws);
-    ws.on("finish", resolve);
-    ws.on("error", reject);
-  });
-  return { name, type: "binary", savedTo: dest };
+  fs.writeFileSync(dest, buf);
+  return { name, type: "binary", savedTo: dest, size: buf.length };
 }
 
 // ─── Tool: upload_onedrive_file ───────────────────────────────────────────────
