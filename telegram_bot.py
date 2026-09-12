@@ -7,6 +7,7 @@ import sys
 import re
 import json
 import time
+import random
 import html as html_mod
 import base64
 import subprocess
@@ -175,23 +176,51 @@ def answer_callback(callback_id, text=None):
 
 # ─── Graph API ─────────────────────────────────────────────────────────────────
 
+_last_graph_request = 0.0
+MIN_GRAPH_INTERVAL = 0.2          # segundos entre peticiones Graph (throttle básico)
+MAX_RETRIES = 3
+
+def _throttle_graph():
+    """Evita sobrepasar el rate limit de Microsoft Graph espaciando peticiones."""
+    global _last_graph_request
+    now = time.time()
+    wait = MIN_GRAPH_INTERVAL - (now - _last_graph_request)
+    if wait > 0:
+        time.sleep(wait)
+    _last_graph_request = time.time()
+
 def call_graph(endpoint, method="GET", body=None):
-    token = get_graph_token()
-    if not token:
-        return {"_error": "no_token"}
-    url = f"https://graph.microsoft.com/v1.0{endpoint}".replace(" ", "%20")
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    result = make_request(url, method=method, headers=headers, body=body)
-    if result is None:
-        return {"_error": "http_failed"}
-    return result
+    """Llamada a Graph con throttle y backoff exponencial ante 429."""
+    for attempt in range(MAX_RETRIES + 1):
+        _throttle_graph()
+        token = get_graph_token()
+        if not token:
+            return {"_error": "no_token"}
+        url = f"https://graph.microsoft.com/v1.0{endpoint}".replace(" ", "%20")
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        result = make_request(url, method=method, headers=headers, body=body)
+        if result is None:
+            return {"_error": "http_failed"}
+        if result.get("_error") == "http_429" and attempt < MAX_RETRIES:
+            wait = (2 ** attempt) + random.uniform(0, 0.5)
+            log(f"Graph rate limited (429), reintento {attempt + 1} en {wait:.1f}s")
+            time.sleep(wait)
+            continue
+        return result
+    return {"_error": "http_429"}
 
 def graph_error_text(res):
     if not res or "_error" not in res:
         return None
     err = res["_error"]
     if err == "no_token":
-        return "❌ No hay sesion activa con Microsoft 365. Ejecuta `npm run auth` en el servidor."
+        return ("❌ No hay sesion activa con Microsoft 365.\n"
+                "Ejecuta `npm run auth` en el servidor y reinicia el bot.")
+    if err == "http_401":
+        return ("❌ El token de Microsoft 365 ha caducado.\n"
+                "Ejecuta `npm run auth` en el servidor y reinicia el bot.")
+    if err == "http_429":
+        return "❌ Microsoft Graph ha limitado las peticiones. Espera un momento y reintenta."
     return "❌ Error al conectar con Microsoft Graph."
 
 def local_midnight_utc():
@@ -645,9 +674,16 @@ def main():
     if IMPORTANT_SENDERS:
         log(f"Push notifications active for: {IMPORTANT_SENDERS}")
     offset = 0
+    _last_heartbeat = 0.0
 
     while True:
         try:
+            # Heartbeat: log alive every 10 min
+            now = time.time()
+            if now - _last_heartbeat > 600:
+                log("heartbeat OK")
+                _last_heartbeat = now
+
             # Push notifications
             for alert in check_important_unread():
                 sender_name = (

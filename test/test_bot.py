@@ -125,5 +125,52 @@ class TestEnvConfig(unittest.TestCase):
         self.assertTrue(bot.BOT_TOKEN)
 
 
+class TestGraphErrors(unittest.TestCase):
+    def test_no_token_message(self):
+        msg = bot.graph_error_text({"_error": "no_token"})
+        self.assertIn("auth", msg.lower())
+
+    def test_401_message(self):
+        msg = bot.graph_error_text({"_error": "http_401"})
+        self.assertIn("caducado", msg.lower())
+
+    def test_429_message(self):
+        msg = bot.graph_error_text({"_error": "http_429"})
+        self.assertIn("limita", msg.lower())
+
+    def test_unknown_error(self):
+        msg = bot.graph_error_text({"_error": "http_500"})
+        self.assertIn("Error", msg)
+
+    def test_no_error_returns_none(self):
+        self.assertIsNone(bot.graph_error_text({}))
+        self.assertIsNone(bot.graph_error_text({"value": []}))
+
+
+class TestThrottle(unittest.TestCase):
+    def test_throttle_exists(self):
+        # Verifies the throttle infrastructure is callable without error
+        bot.MIN_GRAPH_INTERVAL = 0
+        bot._throttle_graph()
+        self.assertTrue(True)
+
+
+class TestSanitizeUrl(unittest.TestCase):
+    def test_strips_query_params(self):
+        url = "https://graph.microsoft.com/v1.0/me/messages?$filter=isRead eq false&$top=5"
+        clean = bot.sanitize_url(url)
+        self.assertNotIn("$filter", clean)
+        self.assertTrue(clean.endswith("/me/messages"))
+
+    def test_masks_long_ids(self):
+        url = "https://graph.microsoft.com/v1.0/me/messages/AQMkADAwATM0MDAAMS1kMTEANS1jYjVkLTAwAi0wMAoALgAA"
+        clean = bot.sanitize_url(url)
+        self.assertIn("/<id>", clean)
+
+    def test_clean_url_passes_through(self):
+        clean = bot.sanitize_url("https://graph.microsoft.com/v1.0/me")
+        self.assertEqual(clean, "https://graph.microsoft.com/v1.0/me")
+
+
 if __name__ == "__main__":
     unittest.main()
