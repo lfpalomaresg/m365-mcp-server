@@ -12,7 +12,7 @@
     "bot": "python telegram_bot.py"
   },
   "dependencies": {
-    "@azure/msal-node": "^2.16.2",
+    "@azure/msal-node": "^6.0.0",
     "@microsoft/microsoft-graph-client": "^3.0.7",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "dotenv": "^16.4.5",
