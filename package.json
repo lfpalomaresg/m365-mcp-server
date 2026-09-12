@@ -5,9 +5,11 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test test/*.test.mjs",
     "start": "node dist/index.js",
     "auth": "node dist/auth.js",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "bot": "python telegram_bot.py"
   },
   "dependencies": {
     "@azure/msal-node": "^2.16.2",

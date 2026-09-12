@@ -8,6 +8,12 @@ import "isomorphic-fetch";
 import * as dotenv from "dotenv";
 import * as fs from "fs";
 import * as path from "path";
+import {
+  createOneDriveFolder,
+  getOneDriveItemMetadata,
+  listOneDriveFolder,
+  moveOneDriveItem,
+} from "./onedrive.js";
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
@@ -146,6 +152,27 @@ async function uploadOneDriveFile(args: { file_name: string; content: string; fo
     .api(`/me/drive/root:/${remotePath}:/content`)
     .put(Buffer.from(args.content, "utf-8"));
   return { id: res.id, name: res.name, webUrl: res.webUrl, size: res.size };
+}
+
+async function listOneDriveFolderTool(args: { folder_id?: string; top?: number; next_page_url?: string }) {
+  return listOneDriveFolder(graphClient(await getAccessToken()), args);
+}
+
+async function getOneDriveItemMetadataTool(args: { item_id: string }) {
+  return getOneDriveItemMetadata(graphClient(await getAccessToken()), args);
+}
+
+async function createOneDriveFolderTool(args: { name: string; parent_id?: string }) {
+  return createOneDriveFolder(graphClient(await getAccessToken()), args);
+}
+
+async function moveOneDriveItemTool(args: {
+  item_id: string;
+  destination_folder_id: string;
+  expected_parent_id: string;
+  expected_name: string;
+}) {
+  return moveOneDriveItem(graphClient(await getAccessToken()), args);
 }
 
 // ─── Tool: update_excel_sheet ─────────────────────────────────────────────────
@@ -407,6 +434,54 @@ const TOOLS = [
     },
   },
   {
+    name: "list_onedrive_folder",
+    description: "List files and folders in the OneDrive root or in a folder selected by its stable item ID",
+    inputSchema: {
+      type: "object",
+      properties: {
+        folder_id: { type: "string", description: "Folder item ID. Omit to list the OneDrive root." },
+        top: { type: "number", description: "Maximum total results, from 1 to 1000 (default 100)" },
+        next_page_url: { type: "string", description: "Continuation URL returned by a previous call; only Microsoft Graph URLs are accepted" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_onedrive_item_metadata",
+    description: "Get safe metadata for a OneDrive file or folder by its stable item ID",
+    inputSchema: {
+      type: "object",
+      properties: { item_id: { type: "string", description: "OneDrive item ID" } },
+      required: ["item_id"],
+    },
+  },
+  {
+    name: "create_onedrive_folder",
+    description: "Create a OneDrive folder. Fails instead of renaming when a sibling already has the same name.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "New folder name" },
+        parent_id: { type: "string", description: "Parent folder item ID. Omit to create in root." },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "move_onedrive_item",
+    description: "Move a OneDrive file or folder using stable item IDs. Does not delete content.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        item_id: { type: "string", description: "ID of the file or folder to move" },
+        destination_folder_id: { type: "string", description: "ID of the destination folder" },
+        expected_parent_id: { type: "string", description: "Current parent ID observed during inventory; aborts if stale" },
+        expected_name: { type: "string", description: "Current item name observed during inventory; aborts if stale" },
+      },
+      required: ["item_id", "destination_folder_id", "expected_parent_id", "expected_name"],
+    },
+  },
+  {
     name: "get_latest_emails",
     description: "Retrieve recent emails from Outlook with optional filters",
     inputSchema: {
@@ -505,6 +580,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "search_onedrive_files":      result = await searchOneDriveFiles(args as any); break;
       case "download_onedrive_file":     result = await downloadOneDriveFile(args as any); break;
       case "upload_onedrive_file":       result = await uploadOneDriveFile(args as any); break;
+      case "list_onedrive_folder":       result = await listOneDriveFolderTool(args as any); break;
+      case "get_onedrive_item_metadata": result = await getOneDriveItemMetadataTool(args as any); break;
+      case "create_onedrive_folder":     result = await createOneDriveFolderTool(args as any); break;
+      case "move_onedrive_item":         result = await moveOneDriveItemTool(args as any); break;
       case "update_excel_sheet":         result = await updateExcelSheet(args as any); break;
       case "get_latest_emails":          result = await getLatestEmails(args as any); break;
       case "send_outlook_email":         result = await sendOutlookEmail(args as any); break;

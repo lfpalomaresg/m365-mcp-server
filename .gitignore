@@ -1,7 +1,10 @@
 node_modules/
-dist/
 .env
+.env.local
 .token_cache.json
-*.js.map
+dist/
+build/
+*.log
 .DS_Store
 .claude/
+__pycache__/
