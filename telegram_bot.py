@@ -4,15 +4,35 @@
 
 import os
 import sys
+import re
 import json
 import time
+import html as html_mod
 import base64
 import subprocess
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import datetime, timezone, timedelta
 
 APP_DIR = os.path.dirname(__file__)
+DIST_DIR = os.path.join(APP_DIR, "dist")
+STATE_FILE = os.path.join(DIST_DIR, "_bot_state.json")
+LOG_FILE = os.path.join(DIST_DIR, "bot.log")
+PLAN_FILE = os.path.join(DIST_DIR, "_bot_plan.json")
+ATTACH_DIR = os.path.join(DIST_DIR, "attachments")
+
+# ─── Logging ───────────────────────────────────────────────────────────────────
+
+def log(msg):
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    print(line)
+    try:
+        os.makedirs(DIST_DIR, exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 # ─── Config ────────────────────────────────────────────────────────────────────
 
@@ -34,17 +54,38 @@ BOT_TOKEN = env.get("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_ID = env.get("TELEGRAM_ALLOWED_USER_ID")
 
 if not BOT_TOKEN or not ALLOWED_USER_ID:
-    print("ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_ALLOWED_USER_ID missing in .env")
+    log("ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_ALLOWED_USER_ID missing in .env")
     sys.exit(1)
 
 ALLOWED_USER_ID = int(ALLOWED_USER_ID)
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Remitentes importantes para notificaciones push (email o nombre)
-IMPORTANT_SENDERS = env.get("TELEGRAM_IMPORTANT_SENDERS", "").split(",")
-IMPORTANT_SENDERS = [s.strip().lower() for s in IMPORTANT_SENDERS if s.strip()]
-
+IMPORTANT_SENDERS = [s.strip().lower() for s in env.get("TELEGRAM_IMPORTANT_SENDERS", "").split(",") if s.strip()]
 NOTIFY_CHECK_SECONDS = int(env.get("TELEGRAM_NOTIFY_INTERVAL", "120"))
+
+# ─── Persistent state ──────────────────────────────────────────────────────────
+
+user_state = {}     # {chat_id: {"state": ..., "to": ..., "subject": ..., "body": ..., "reply_to": ...}}
+last_results = {}   # {chat_id_str: {short_id: message_id}}
+
+def save_state():
+    try:
+        os.makedirs(DIST_DIR, exist_ok=True)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"user_state": user_state, "last_results": last_results}, f, ensure_ascii=False)
+    except Exception as e:
+        log(f"save_state error: {e}")
+
+def load_state():
+    global user_state, last_results
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                user_state = data.get("user_state", {})
+                last_results = data.get("last_results", {})
+    except Exception as e:
+        log(f"load_state error: {e}")
 
 # ─── Token & HTTP ──────────────────────────────────────────────────────────────
 
@@ -56,7 +97,7 @@ def get_graph_token():
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
     except Exception as e:
-        print(f"Token error: {e}")
+        log(f"Token error: {e}")
     return None
 
 def make_request(url, method="GET", headers=None, body=None, timeout=40):
@@ -69,9 +110,15 @@ def make_request(url, method="GET", headers=None, body=None, timeout=40):
         req.data = json.dumps(body).encode("utf-8")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
-            return json.loads(res.read().decode("utf-8"))
+            raw = res.read().decode("utf-8")
+            if not raw.strip():
+                return {"_status": res.status}
+            return json.loads(raw)
+    except urllib.error.HTTPError as e:
+        log(f"HTTP {e.code} on {url}: {e.reason}")
+        return {"_error": f"http_{e.code}"}
     except Exception as e:
-        print(f"HTTP error: {e}")
+        log(f"HTTP error on {url}: {e}")
         return None
 
 def send_telegram(chat_id, text, reply_markup=None):
@@ -118,23 +165,51 @@ def call_graph(endpoint, method="GET", body=None):
         return {"_error": "http_failed"}
     return result
 
+def graph_error_text(res):
+    if not res or "_error" not in res:
+        return None
+    err = res["_error"]
+    if err == "no_token":
+        return "❌ No hay sesion activa con Microsoft 365. Ejecuta `npm run auth` en el servidor."
+    return "❌ Error al conectar con Microsoft Graph."
+
 def local_midnight_utc():
-    """Return ISO timestamp for start of today in local timezone, in UTC."""
     now = datetime.now().astimezone()
     local_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return local_midnight.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return local_midnight.astimezone(timezone.utc)
 
-def format_email_list(emails):
+def strip_html(text):
+    if not text:
+        return ""
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    return html_mod.unescape(text).strip()
+
+def format_email_list(emails, show_ids=True):
     if not emails:
         return "Sin resultados."
     msg = ""
     for i, m in enumerate(emails, 1):
         sender = (m.get("from", {}) or {}).get("emailAddress", {}) or {}
         name = sender.get("name", "?")
-        subj = m.get("subject", "Sin asunto")
+        subj = (m.get("subject") or "Sin asunto")[:70]
         t = (m.get("receivedDateTime", "") or "")[11:16]
-        msg += f"{i}. [{t}] *{name}*:\n   _{subj}_\n\n"
+        prefix = f"{i}." if show_ids else "•"
+        msg += f"{prefix} [{t}] *{name}*:\n   _{subj}_\n"
+    msg += "\nResponde `/ver <nº>` para leerlo, o usa los botones de accion."
     return msg
+
+def register_results(chat_id, emails):
+    """Map short ids (1-based) to Graph message ids, persisted."""
+    mapping = {}
+    for i, m in enumerate(emails, 1):
+        mid = m.get("id")
+        if mid:
+            mapping[str(i)] = mid
+    last_results[str(chat_id)] = mapping
+    save_state()
+    return mapping
 
 # ─── Folder Resolution ─────────────────────────────────────────────────────────
 
@@ -146,10 +221,10 @@ def resolve_folder_id(path):
     if not inbox_res or "_error" in inbox_res:
         return None
     inbox_id = inbox_res.get("id")
-    inbox_name = inbox_res.get("displayName")
+    inbox_name = (inbox_res.get("displayName") or "").lower()
     current_id = inbox_id
     start_idx = 0
-    if segments[0].lower() in ["inbox", "bandeja de entrada", (inbox_name or "").lower()]:
+    if segments[0].lower() in ["inbox", "bandeja de entrada", inbox_name]:
         start_idx = 1
     for i in range(start_idx, len(segments)):
         subs = call_graph(f"/me/mailFolders/{current_id}/childFolders?$top=100")
@@ -157,13 +232,62 @@ def resolve_folder_id(path):
             return None
         found = next(
             (f for f in subs.get("value", [])
-             if f.get("displayName", "").lower() == segments[i].lower()),
+             if (f.get("displayName") or "").lower() == segments[i].lower()),
             None
         )
         if not found:
             return None
         current_id = found.get("id")
     return current_id
+
+def get_archive_folder_id():
+    res = call_graph("/me/mailFolders/archive")
+    if res and "_error" not in res and res.get("id"):
+        return res["id"]
+    # Fallback: look for a folder named "Archive" / "Archivo" under inbox
+    return resolve_folder_id("Archivo") or resolve_folder_id("Archive")
+
+# ─── Email Actions ─────────────────────────────────────────────────────────────
+
+def get_message_body(msg_id):
+    res = call_graph(
+        f"/me/messages/{msg_id}?$select=id,subject,from,receivedDateTime,bodyPreview,body,hasAttachments"
+    )
+    if not res or "_error" in res:
+        return None
+    body_html = ((res.get("body") or {}).get("content")) or ""
+    preview = res.get("bodyPreview") or ""
+    plain = strip_html(body_html) if body_html else preview
+    return {
+        "id": msg_id,
+        "subject": res.get("subject", "?"),
+        "from": ((res.get("from") or {}).get("emailAddress") or {}).get("name", "?"),
+        "received": res.get("receivedDateTime", ""),
+        "preview": preview,
+        "body": plain,
+        "hasAttachments": res.get("hasAttachments", False)
+    }
+
+def mark_read(msg_id):
+    res = call_graph(f"/me/messages/{msg_id}", method="PATCH", body={"isRead": True})
+    return res and "_error" not in res
+
+def archive_message(msg_id):
+    folder_id = get_archive_folder_id()
+    if not folder_id:
+        return False
+    res = call_graph(f"/me/messages/{msg_id}/move", method="POST",
+                     body={"destinationId": folder_id})
+    return res and "_error" not in res
+
+def delete_message(msg_id):
+    res = call_graph(f"/me/messages/{msg_id}", method="DELETE")
+    return res is not None and "_error" not in res
+
+def reply_message(msg_id, comment):
+    res = call_graph(f"/me/messages/{msg_id}/reply", method="POST",
+                     body={"comment": comment})
+    return res is not None and "_error" not in res
 
 # ─── Taxonomy & Classification ─────────────────────────────────────────────────
 
@@ -185,18 +309,20 @@ TAXONOMY = {
         "qualianza", "calidad pascual", "huevos", "leche", "agua"]
 }
 
-def classify_unread(apply_now=False):
+def fetch_unread(top=30):
     res = call_graph(
-        "/me/messages?$filter=isRead eq false&$top=30"
+        f"/me/messages?$filter=isRead eq false&$top={top}"
         "&$select=id,subject,sender,receivedDateTime,bodyPreview"
     )
     if not res or "_error" in res:
-        err = (res or {}).get("_error", "unknown")
-        if err == "no_token":
-            return "❌ No hay sesion activa con Microsoft 365. Ejecuta `npm run auth` en el servidor."
+        return None
+    return res.get("value", [])
+
+def classify_unread(chat_id=None, apply_now=False):
+    emails = fetch_unread()
+    if emails is None:
         return "❌ Error al conectar con Microsoft Graph."
 
-    emails = res.get("value", [])
     if not emails:
         return "No tienes correos sin leer. Bandeja despejada. 🟢"
 
@@ -219,15 +345,15 @@ def classify_unread(apply_now=False):
             })
 
     if not proposed:
+        register_results(chat_id, emails) if chat_id else None
         return (f"Hay {len(emails)} correos sin leer, pero ninguno encaja "
-                "en las reglas automaticas. Revisalos manualmente.")
+                "en las reglas automaticas. Revisalos manualmente con /hoy.")
 
     if apply_now:
         return apply_plan(proposed)
 
-    plan_path = os.path.join(APP_DIR, "dist", "_bot_plan.json")
-    os.makedirs(os.path.dirname(plan_path), exist_ok=True)
-    with open(plan_path, "w", encoding="utf-8") as f:
+    os.makedirs(DIST_DIR, exist_ok=True)
+    with open(PLAN_FILE, "w", encoding="utf-8") as f:
         json.dump(proposed, f, indent=2, ensure_ascii=False)
 
     msg = f"📋 *Propuesta ({len(proposed)} de {len(emails)} sin leer):*\n\n"
@@ -238,10 +364,9 @@ def classify_unread(apply_now=False):
 
 def apply_plan(proposed=None):
     if proposed is None:
-        plan_path = os.path.join(APP_DIR, "dist", "_bot_plan.json")
-        if not os.path.exists(plan_path):
+        if not os.path.exists(PLAN_FILE):
             return "No hay plan pendiente. Usa Clasificar primero."
-        with open(plan_path, "r", encoding="utf-8") as f:
+        with open(PLAN_FILE, "r", encoding="utf-8") as f:
             proposed = json.load(f)
 
     ok = 0
@@ -263,16 +388,14 @@ def apply_plan(proposed=None):
         else:
             fail += 1
 
-    # Cleanup
-    plan_path = os.path.join(APP_DIR, "dist", "_bot_plan.json")
     try:
-        os.remove(plan_path)
+        os.remove(PLAN_FILE)
     except OSError:
         pass
 
     return f"✅ Movidos: {ok}  |  ❌ Fallidos: {fail}"
 
-# ─── Search ────────────────────────────────────────────────────────────────────
+# ─── Search / Calendar / Tasks ─────────────────────────────────────────────────
 
 def search_emails(query, limit=10):
     q = urllib.parse.quote(query)
@@ -283,6 +406,41 @@ def search_emails(query, limit=10):
     if not res or "_error" in res:
         return None
     return res.get("value", [])
+
+def get_today_events():
+    start = local_midnight_utc()
+    end = start + timedelta(hours=24)
+    s = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    e = end.strftime("%Y-%m-%dT%H:%M:%SZ")
+    res = call_graph(
+        f"/me/calendarView?startDateTime={s}&endDateTime={e}"
+        "&$top=20&$select=subject,start,end,location"
+    )
+    if not res or "_error" in res:
+        return None
+    return res.get("value", [])
+
+def get_todo_tasks():
+    res = call_graph("/me/todo/lists")
+    if not res or "_error" in res:
+        return None
+    lists = res.get("value", [])
+    if not lists:
+        return []
+    tasks = []
+    for lst in lists[:3]:
+        tres = call_graph(f"/me/todo/lists/{lst['id']}/tasks")
+        if tres and "_error" not in tres:
+            for t in tres.get("value", []):
+                if t.get("status") != "completed":
+                    due = t.get("dueDateTime") or {}
+                    tasks.append({
+                        "title": t.get("title", "?"),
+                        "list": lst.get("displayName", "?"),
+                        "due": due.get("dateTime", "") if isinstance(due, dict) else "",
+                        "importance": t.get("importance", "normal")
+                    })
+    return tasks
 
 # ─── Send Email ────────────────────────────────────────────────────────────────
 
@@ -298,8 +456,8 @@ def send_email_via_graph(to, subject, body):
 
 # ─── Attachments ───────────────────────────────────────────────────────────────
 
-def get_attachment(message_id):
-    res = call_graph(f"/me/messages/{message_id}/attachments")
+def get_attachment(msg_id):
+    res = call_graph(f"/me/messages/{msg_id}/attachments")
     if not res or "_error" in res:
         return None
     attachments = []
@@ -313,41 +471,48 @@ def get_attachment(message_id):
             })
     return attachments
 
-# ─── Inline Keyboard ───────────────────────────────────────────────────────────
+# ─── Inline Keyboards ──────────────────────────────────────────────────────────
 
 def main_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "📬 Hoy (no leidos)", "callback_data": "hoy"}],
-            [{"text": "📋 Clasificar", "callback_data": "clasifica"},
-             {"text": "✅ Aplicar", "callback_data": "aplicar"}],
+            [{"text": "📬 Hoy", "callback_data": "hoy"},
+             {"text": "📋 Clasificar", "callback_data": "clasifica"}],
             [{"text": "🔍 Buscar", "callback_data": "buscar"},
              {"text": "✉️ Enviar", "callback_data": "enviar"}],
-            [{"text": "📎 Adjuntos", "callback_data": "adjuntos_menu"}],
+            [{"text": "📅 Calendario", "callback_data": "calendario"},
+             {"text": "✅ Tareas", "callback_data": "tareas"}],
         ]
     }
 
 def confirm_keyboard(positive_data):
     return {
         "inline_keyboard": [
+            [{"text": "✅ Confirmar", "callback_data": positive_data},
+             {"text": "❌ Cancelar", "callback_data": "cancel"}]
+        ]
+    }
+
+def email_actions_keyboard(short_id):
+    return {
+        "inline_keyboard": [
             [
-                {"text": "✅ Confirmar", "callback_data": positive_data},
-                {"text": "❌ Cancelar", "callback_data": "cancel"}
-            ]
+                {"text": "✅ Leído", "callback_data": f"leido:{short_id}"},
+                {"text": "📥 Archivar", "callback_data": f"archivar:{short_id}"},
+                {"text": "🗑 Eliminar", "callback_data": f"eliminar:{short_id}"}
+            ],
+            [{"text": "↩️ Responder", "callback_data": f"responder:{short_id}"}],
+            [{"text": "⬅️ Menú", "callback_data": "menu"}]
         ]
     }
 
 def main_menu_text():
     return "👋 *Asistente M365*\n\nQue quieres hacer?"
 
-# ─── State Machine for /enviar ─────────────────────────────────────────────────
-
-user_state = {}  # {chat_id: {"state": str, "to": str, "subject": str, "body": str}}
-
 # ─── Push Notifications ────────────────────────────────────────────────────────
 
 _last_notify_check = 0
-_notified_ids = set()  # avoid notifying same email twice
+_notified_ids = set()
 
 def check_important_unread():
     global _last_notify_check, _notified_ids
@@ -355,11 +520,9 @@ def check_important_unread():
     if now - _last_notify_check < NOTIFY_CHECK_SECONDS:
         return []
     _last_notify_check = now
-
     if not IMPORTANT_SENDERS:
         return []
 
-    # Reuse human-readable name match: get recent unread and filter client-side
     res = call_graph(
         "/me/messages?$filter=isRead eq false&$top=10"
         "&$select=id,subject,from,receivedDateTime"
@@ -372,45 +535,112 @@ def check_important_unread():
         mid = m.get("id")
         if mid in _notified_ids:
             continue
-        sender_addr = (((m.get("from") or {}).get("emailAddress") or {}).get("address") or "").lower()
-        sender_name = (((m.get("from") or {}).get("emailAddress") or {}).get("name") or "").lower()
-        combined = f"{sender_name} {sender_addr}"
+        sender = ((m.get("from") or {}).get("emailAddress") or {})
+        combined = f"{sender.get('name', '')} {sender.get('address', '')}".lower()
         if any(s in combined for s in IMPORTANT_SENDERS):
             alerts.append(m)
             _notified_ids.add(mid)
 
-    # Keep notified_ids from growing indefinitely
     if len(_notified_ids) > 500:
         _notified_ids = set(list(_notified_ids)[-200:])
-
     return alerts
+
+# ─── Message / Callback handlers ───────────────────────────────────────────────
+
+def handle_hoy(chat_id):
+    midnight = local_midnight_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+    res = call_graph(
+        f"/me/messages?$filter=isRead eq false and receivedDateTime ge {midnight}"
+        "&$top=15&$select=id,subject,from,receivedDateTime,hasAttachments"
+    )
+    err = graph_error_text(res)
+    if err:
+        return err
+    emails = res.get("value", [])
+    if not emails:
+        return "No tienes correos sin leer recibidos hoy. 🟢"
+    register_results(chat_id, emails)
+    return "📬 *Hoy (sin leer):*\n\n" + format_email_list(emails)
+
+def handle_buscar(chat_id, query):
+    results = search_emails(query)
+    if results is None:
+        return "❌ Error al buscar."
+    if not results:
+        return f"No encontre resultados para \"{query}\"."
+    register_results(chat_id, results)
+    return f"🔍 *Resultados ({len(results)}):*\n\n" + format_email_list(results)
+
+def handle_ver(chat_id, short_id):
+    mapping = last_results.get(str(chat_id), {})
+    msg_id = mapping.get(str(short_id))
+    if not msg_id:
+        return f"No tengo el mensaje nº {short_id}. Lanza /hoy o /buscar primero."
+    body = get_message_body(msg_id)
+    if not body:
+        return "❌ No pude leer ese correo."
+    text = (
+        f"📧 *{body['subject']}*\n"
+        f"De: {body['from']}\n"
+        f"Recibido: {body['received'][:16].replace('T', ' ')}\n\n"
+        f"{body['body'][:1500]}"
+    )
+    return text
+
+def handle_calendar(chat_id):
+    events = get_today_events()
+    if events is None:
+        return "❌ Error al leer el calendario."
+    if not events:
+        return "📅 No tienes eventos hoy."
+    msg = f"📅 *Eventos de hoy ({len(events)}):*\n\n"
+    for e in events:
+        start = (e.get("start") or {}).get("dateTime", "") or ""
+        subj = e.get("subject", "Sin título")
+        loc = (e.get("location") or {}).get("displayName", "")
+        t = start[11:16] if start else "?"
+        loc_txt = f" — {loc}" if loc else ""
+        msg += f"• [{t}] {subj}{loc_txt}\n"
+    return msg
+
+def handle_tareas(chat_id):
+    tasks = get_todo_tasks()
+    if tasks is None:
+        return "❌ Error al leer las tareas."
+    if not tasks:
+        return "✅ No tienes tareas pendientes."
+    msg = f"✅ *Tareas pendientes ({len(tasks)}):*\n\n"
+    for t in tasks:
+        due = f" — {t['due'][:10]}" if t.get("due") else ""
+        star = "⭐" if t.get("importance") == "high" else ""
+        msg += f"{star}• {t['title']} ({t['list']}){due}\n"
+    return msg
 
 # ─── Main Loop ─────────────────────────────────────────────────────────────────
 
 def main():
-    print("M365 Telegram Bot starting...")
+    log("M365 Telegram Bot starting...")
+    load_state()
     if IMPORTANT_SENDERS:
-        print(f"Push notifications active for: {IMPORTANT_SENDERS}")
+        log(f"Push notifications active for: {IMPORTANT_SENDERS}")
     offset = 0
 
     while True:
         try:
-            # 1. Check for push notifications
-            push_alerts = check_important_unread()
-            for alert in push_alerts:
+            # Push notifications
+            for alert in check_important_unread():
                 sender_name = (
                     ((alert.get("from") or {}).get("emailAddress") or {}).get("name", "?")
                 )
-                subj = alert.get("subject", "?")
                 send_telegram(
                     ALLOWED_USER_ID,
                     f"🔔 *Correo importante sin leer*\n\n"
                     f"De: *{sender_name}*\n"
-                    f"Asunto: _{subj}_\n\n"
+                    f"Asunto: _{alert.get('subject', '?')}_\n\n"
                     f"Responde /hoy para ver detalles."
                 )
 
-            # 2. Poll Telegram
+            # Poll Telegram
             url = f"{TELEGRAM_API_URL}/getUpdates?offset={offset}&timeout=30"
             res = make_request(url, timeout=40)
             if not res or not res.get("ok"):
@@ -419,7 +649,7 @@ def main():
             for update in res.get("result", []):
                 offset = update.get("update_id") + 1
 
-                # ── Callback Query (inline button press) ──
+                # ── Callback Query ──
                 cb = update.get("callback_query")
                 if cb:
                     cb_id = cb.get("id")
@@ -431,234 +661,265 @@ def main():
                         answer_callback(cb_id, "No autorizado")
                         continue
 
-                    answer_callback(cb_id)  # dismiss loading spinner
-
-                    if cb_data == "hoy":
-                        send_telegram(cb_chat_id, "📬 Buscando correos sin leer de hoy...")
-                        midnight = local_midnight_utc()
-                        res_emails = call_graph(
-                            f"/me/messages?$filter=isRead eq false and "
-                            f"receivedDateTime ge {midnight}"
-                            f"&$top=15&$select=id,subject,from,receivedDateTime,hasAttachments"
-                        )
-                        if not res_emails or "_error" in res_emails:
-                            send_telegram(cb_chat_id,
-                                "❌ Error al conectar con Microsoft Graph.")
-                        else:
-                            emails = res_emails.get("value", [])
-                            if not emails:
-                                send_telegram(cb_chat_id,
-                                    "No tienes correos sin leer recibidos hoy. 🟢")
-                            else:
-                                msg = f"📬 *Hoy ({len(emails)} sin leer):*\n\n"
-                                msg += format_email_list(emails)
-                                send_telegram(cb_chat_id, msg)
-
-                    elif cb_data == "clasifica":
-                        send_telegram(cb_chat_id, "📋 Analizando...")
-                        resp = classify_unread(apply_now=False)
-                        keyboard = confirm_keyboard("confirm_aplicar") if "📋" in resp else None
-                        send_telegram(cb_chat_id, resp, reply_markup=keyboard)
-
-                    elif cb_data == "confirm_aplicar":
-                        resp = apply_plan()
-                        send_telegram(cb_chat_id, resp, reply_markup=main_keyboard())
-
-                    elif cb_data == "aplicar":
-                        resp = apply_plan()
-                        send_telegram(cb_chat_id, resp, reply_markup=main_keyboard())
-
-                    elif cb_data == "confirm_send":
-                        st_send = user_state.get(cb_chat_id, {})
-                        if st_send.get("state") == "waiting_confirm":
-                            sent = send_email_via_graph(
-                                st_send["to"], st_send["subject"], st_send["body"]
-                            )
-                            user_state.pop(cb_chat_id, None)
-                            if sent:
-                                send_telegram(cb_chat_id,
-                                    f"✅ Correo enviado a *{st_send['to']}*.",
-                                    reply_markup=main_keyboard())
-                            else:
-                                send_telegram(cb_chat_id,
-                                    "❌ No se pudo enviar el correo.",
-                                    reply_markup=main_keyboard())
-                        else:
-                            answer_callback(cb_id, "Sesion de envio expirada")
-
-                    elif cb_data == "buscar":
-                        user_state[cb_chat_id] = {"state": "waiting_search"}
-                        send_telegram(cb_chat_id, "🔍 Escribe lo que quieres buscar en tus correos:")
-
-                    elif cb_data == "enviar":
-                        user_state[cb_chat_id] = {"state": "waiting_to"}
-                        send_telegram(cb_chat_id, "✉️ *Enviar correo*\n\nDestinatario (email):")
-
-                    elif cb_data == "adjuntos_menu":
-                        send_telegram(cb_chat_id,
-                            "📎 Para descargar un adjunto, responde con:\n"
-                            "`/adjuntos <id_del_mensaje>`\n\n"
-                            "Usa Buscar primero para encontrar el mensaje y su ID.")
-
-                    elif cb_data == "cancel":
-                        user_state.pop(cb_chat_id, None)
-                        send_telegram(cb_chat_id, "Cancelado.", reply_markup=main_keyboard())
-
-                    continue  # callback handled, skip message processing
+                    answer_callback(cb_id)
+                    handle_callback(cb_chat_id, cb_data, cb_id)
+                    continue
 
                 # ── Text Message ──
                 message = update.get("message")
                 if not message:
                     continue
-
                 chat_id = message.get("chat", {}).get("id")
                 user_id = message.get("from", {}).get("id")
                 if user_id != ALLOWED_USER_ID:
                     continue
-
                 text = (message.get("text") or "").strip()
-
-                # ── State machine for /enviar & /buscar ──
-                st = user_state.get(chat_id)
-
-                if st:
-                    state_name = st.get("state")
-
-                    if state_name == "waiting_search":
-                        user_state.pop(chat_id, None)
-                        send_telegram(chat_id, f"🔍 Buscando \"{text}\"...")
-                        results = search_emails(text)
-                        if results is None:
-                            send_telegram(chat_id, "❌ Error al buscar.")
-                        elif not results:
-                            send_telegram(chat_id,
-                                f"No encontre resultados para \"{text}\".")
-                        else:
-                            msg = f"🔍 *Resultados para \"{text}\" ({len(results)}):*\n\n"
-                            msg += format_email_list(results)
-                            send_telegram(chat_id, msg, reply_markup=main_keyboard())
-
-                    elif state_name == "waiting_to":
-                        st["to"] = text
-                        st["state"] = "waiting_subject"
-                        send_telegram(chat_id, "Asunto del correo:")
-
-                    elif state_name == "waiting_subject":
-                        st["subject"] = text
-                        st["state"] = "waiting_body"
-                        send_telegram(chat_id, "Cuerpo del mensaje:")
-
-                    elif state_name == "waiting_body":
-                        st["body"] = text
-                        st["state"] = "waiting_confirm"
-                        summary = (
-                            f"✉️ *Confirmar envio:*\n\n"
-                            f"*Para:* {st['to']}\n"
-                            f"*Asunto:* {st['subject']}\n"
-                            f"*Cuerpo:* {st['body'][:200]}"
-                        )
-                        send_telegram(chat_id, summary,
-                                      reply_markup=confirm_keyboard("confirm_send"))
-
-                    elif state_name == "waiting_confirm":
-                        send_telegram(chat_id,
-                            "Usa los botones *Confirmar* o *Cancelar* para decidir.",
-                            reply_markup=confirm_keyboard("confirm_send"))
-                    continue
-
-                # ── Commands ──
-                if text in ("/start", "/help"):
-                    send_telegram(chat_id, main_menu_text(), reply_markup=main_keyboard())
-
-                elif text == "/hoy":
-                    send_telegram(chat_id, "📬 Buscando correos sin leer de hoy...")
-                    midnight = local_midnight_utc()
-                    res_emails = call_graph(
-                        f"/me/messages?$filter=isRead eq false and "
-                        f"receivedDateTime ge {midnight}"
-                        f"&$top=15&$select=id,subject,from,receivedDateTime,hasAttachments"
-                    )
-                    if not res_emails or "_error" in res_emails:
-                        send_telegram(chat_id,
-                            "❌ Error al conectar con Microsoft Graph.")
-                    else:
-                        emails = res_emails.get("value", [])
-                        if not emails:
-                            send_telegram(chat_id,
-                                "No tienes correos sin leer recibidos hoy. 🟢")
-                        else:
-                            msg = f"📬 *Hoy ({len(emails)} sin leer):*\n\n"
-                            msg += format_email_list(emails)
-                            send_telegram(chat_id, msg)
-
-                elif text == "/clasifica":
-                    send_telegram(chat_id, "📋 Analizando...")
-                    resp = classify_unread(apply_now=False)
-                    keyboard = confirm_keyboard("confirm_aplicar") if resp.startswith("📋") else None
-                    send_telegram(chat_id, resp, reply_markup=keyboard)
-
-                elif text == "/aplicar":
-                    resp = apply_plan()
-                    send_telegram(chat_id, resp, reply_markup=main_keyboard())
-
-                elif text.startswith("/buscar "):
-                    query = text[len("/buscar "):].strip()
-                    if not query:
-                        send_telegram(chat_id, "Uso: `/buscar <texto>`")
-                        continue
-                    send_telegram(chat_id, f"🔍 Buscando \"{query}\"...")
-                    results = search_emails(query)
-                    if results is None:
-                        send_telegram(chat_id, "❌ Error al buscar.")
-                    elif not results:
-                        send_telegram(chat_id,
-                            f"No encontre resultados para \"{query}\".")
-                    else:
-                        msg = f"🔍 *Resultados ({len(results)}):*\n\n"
-                        msg += format_email_list(results)
-                        send_telegram(chat_id, msg)
-
-                elif text.startswith("/adjuntos "):
-                    msg_id = text[len("/adjuntos "):].strip()
-                    send_telegram(chat_id, "📎 Descargando adjuntos...")
-                    atts = get_attachment(msg_id)
-                    if atts is None:
-                        send_telegram(chat_id, "❌ Error al acceder a los adjuntos.")
-                    elif not atts:
-                        send_telegram(chat_id,
-                            "Ese mensaje no tiene adjuntos descargables.")
-                    else:
-                        saved = os.path.join(APP_DIR, "dist", "attachments")
-                        os.makedirs(saved, exist_ok=True)
-                        filenames = []
-                        for att in atts:
-                            fpath = os.path.join(saved, att["name"])
-                            data = base64.b64decode(att["bytes"])
-                            with open(fpath, "wb") as f:
-                                f.write(data)
-                            filenames.append(f"{att['name']} ({len(data)} bytes)")
-                        send_telegram(chat_id,
-                            "📎 *Adjuntos guardados:*\n\n" +
-                            "\n".join(f"  • {n}" for n in filenames))
-
-                elif text == "/enviar":
-                    user_state[chat_id] = {"state": "waiting_to"}
-                    send_telegram(chat_id, "✉️ *Enviar correo*\n\nDestinatario (email):")
-
-                elif text.startswith("/"):
-                    send_telegram(chat_id,
-                        "Comando no reconocido. Usa los botones o /help.",
-                        reply_markup=main_keyboard())
-
-                else:
-                    # Free text: offer keyboard
-                    send_telegram(chat_id, main_menu_text(), reply_markup=main_keyboard())
+                handle_message(chat_id, text)
 
         except Exception as e:
-            print(f"Loop error: {e}")
+            log(f"Loop error: {e}")
             time.sleep(5)
 
         time.sleep(1)
+
+def handle_callback(chat_id, data, cb_id):
+    """Dispatch inline button presses."""
+    try:
+        if data == "menu":
+            send_telegram(chat_id, main_menu_text(), reply_markup=main_keyboard())
+            return
+
+        if data == "hoy":
+            send_telegram(chat_id, "📬 Buscando...")
+            send_telegram(chat_id, handle_hoy(chat_id))
+            return
+
+        if data == "clasifica":
+            send_telegram(chat_id, "📋 Analizando...")
+            resp = classify_unread(chat_id=chat_id)
+            keyboard = confirm_keyboard("confirm_aplicar") if resp.startswith("📋") else main_keyboard()
+            send_telegram(chat_id, resp, reply_markup=keyboard)
+            return
+
+        if data == "confirm_aplicar":
+            send_telegram(chat_id, apply_plan(), reply_markup=main_keyboard())
+            return
+
+        if data == "buscar":
+            user_state[chat_id] = {"state": "waiting_search"}
+            save_state()
+            send_telegram(chat_id, "🔍 Escribe lo que quieres buscar:")
+            return
+
+        if data == "enviar":
+            user_state[chat_id] = {"state": "waiting_to"}
+            save_state()
+            send_telegram(chat_id, "✉️ *Enviar correo*\n\nDestinatario (email):")
+            return
+
+        if data == "calendario":
+            send_telegram(chat_id, handle_calendar(chat_id))
+            return
+
+        if data == "tareas":
+            send_telegram(chat_id, handle_tareas(chat_id))
+            return
+
+        if data == "cancel":
+            user_state.pop(chat_id, None)
+            save_state()
+            send_telegram(chat_id, "Cancelado.", reply_markup=main_keyboard())
+            return
+
+        if data == "confirm_send":
+            st = user_state.get(chat_id, {})
+            if st.get("state") == "waiting_confirm":
+                ok = send_email_via_graph(st["to"], st["subject"], st["body"])
+                user_state.pop(chat_id, None)
+                save_state()
+                send_telegram(chat_id,
+                    f"✅ Correo enviado a *{st['to']}*." if ok else "❌ No se pudo enviar.",
+                    reply_markup=main_keyboard())
+            else:
+                answer_callback(cb_id, "Sesion expirada")
+            return
+
+        # Email actions: leido:N / archivar:N / eliminar:N / responder:N
+        if ":" in data:
+            action, short_id = data.split(":", 1)
+            mapping = last_results.get(str(chat_id), {})
+            msg_id = mapping.get(short_id)
+            if not msg_id:
+                answer_callback(cb_id, "Mensaje no disponible. Lanza /hoy o /buscar.")
+                return
+            if action == "leido":
+                ok = mark_read(msg_id)
+                send_telegram(chat_id, "✅ Marcado como leído." if ok else "❌ Error.", reply_markup=main_keyboard())
+            elif action == "archivar":
+                ok = archive_message(msg_id)
+                send_telegram(chat_id, "📥 Archivado." if ok else "❌ Error.", reply_markup=main_keyboard())
+            elif action == "eliminar":
+                ok = delete_message(msg_id)
+                send_telegram(chat_id, "🗑 Eliminado." if ok else "❌ Error.", reply_markup=main_keyboard())
+            elif action == "responder":
+                user_state[chat_id] = {"state": "waiting_reply_body", "reply_to": msg_id}
+                save_state()
+                send_telegram(chat_id, "↩️ Escribe el texto de tu respuesta:")
+            return
+
+        send_telegram(chat_id, main_menu_text(), reply_markup=main_keyboard())
+
+    except Exception as e:
+        log(f"Callback error: {e}")
+
+def handle_message(chat_id, text):
+    try:
+        # State machine
+        st = user_state.get(chat_id)
+        if st:
+            state_name = st.get("state")
+
+            if state_name == "waiting_search":
+                user_state.pop(chat_id, None)
+                save_state()
+                send_telegram(chat_id, f"🔍 Buscando \"{text}\"...")
+                send_telegram(chat_id, handle_buscar(chat_id, text), reply_markup=main_keyboard())
+                return
+
+            if state_name == "waiting_to":
+                st["to"] = text
+                st["state"] = "waiting_subject"
+                save_state()
+                send_telegram(chat_id, "Asunto del correo:")
+                return
+
+            if state_name == "waiting_subject":
+                st["subject"] = text
+                st["state"] = "waiting_body"
+                save_state()
+                send_telegram(chat_id, "Cuerpo del mensaje:")
+                return
+
+            if state_name == "waiting_body":
+                st["body"] = text
+                st["state"] = "waiting_confirm"
+                save_state()
+                summary = (
+                    f"✉️ *Confirmar envio:*\n\n"
+                    f"*Para:* {st['to']}\n"
+                    f"*Asunto:* {st['subject']}\n"
+                    f"*Cuerpo:* {st['body'][:200]}"
+                )
+                send_telegram(chat_id, summary, reply_markup=confirm_keyboard("confirm_send"))
+                return
+
+            if state_name == "waiting_confirm":
+                send_telegram(chat_id,
+                    "Usa los botones *Confirmar* o *Cancelar*.",
+                    reply_markup=confirm_keyboard("confirm_send"))
+                return
+
+            if state_name == "waiting_reply_body":
+                reply_to = st.get("reply_to")
+                user_state.pop(chat_id, None)
+                save_state()
+                if reply_to:
+                    ok = reply_message(reply_to, text)
+                    send_telegram(chat_id,
+                        "↩️ Respuesta enviada." if ok else "❌ Error al responder.",
+                        reply_markup=main_keyboard())
+                else:
+                    send_telegram(chat_id, "Sesion de respuesta expirada.", reply_markup=main_keyboard())
+                return
+
+        # Commands
+        cmd = text.split(" ")[0].lower()
+
+        if text in ("/start", "/help", "/menu"):
+            send_telegram(chat_id, main_menu_text(), reply_markup=main_keyboard())
+
+        elif cmd == "/hoy":
+            send_telegram(chat_id, "📬 Buscando...")
+            send_telegram(chat_id, handle_hoy(chat_id))
+
+        elif cmd == "/clasifica":
+            send_telegram(chat_id, "📋 Analizando...")
+            resp = classify_unread(chat_id=chat_id)
+            keyboard = confirm_keyboard("confirm_aplicar") if resp.startswith("📋") else main_keyboard()
+            send_telegram(chat_id, resp, reply_markup=keyboard)
+
+        elif cmd == "/aplicar":
+            send_telegram(chat_id, apply_plan(), reply_markup=main_keyboard())
+
+        elif cmd == "/ver":
+            parts = text.split(" ", 1)
+            short_id = parts[1].strip() if len(parts) > 1 else ""
+            if not short_id:
+                send_telegram(chat_id, "Uso: `/ver <nº>` (el número sale en /hoy o /buscar).")
+                return
+            body = handle_ver(chat_id, short_id)
+            send_telegram(chat_id, body, reply_markup=email_actions_keyboard(short_id))
+
+        elif cmd == "/buscar":
+            query = text[len("/buscar"):].strip()
+            if not query:
+                user_state[chat_id] = {"state": "waiting_search"}
+                save_state()
+                send_telegram(chat_id, "🔍 Escribe lo que quieres buscar:")
+                return
+            send_telegram(chat_id, f"🔍 Buscando \"{query}\"...")
+            send_telegram(chat_id, handle_buscar(chat_id, query), reply_markup=main_keyboard())
+
+        elif cmd == "/enviar":
+            user_state[chat_id] = {"state": "waiting_to"}
+            save_state()
+            send_telegram(chat_id, "✉️ *Enviar correo*\n\nDestinatario (email):")
+
+        elif cmd == "/calendario":
+            send_telegram(chat_id, handle_calendar(chat_id))
+
+        elif cmd == "/tareas":
+            send_telegram(chat_id, handle_tareas(chat_id))
+
+        elif cmd == "/adjuntos":
+            parts = text.split(" ", 1)
+            msg_id = parts[1].strip() if len(parts) > 1 else ""
+            if not msg_id:
+                mapping = last_results.get(str(chat_id), {})
+                if not mapping:
+                    send_telegram(chat_id, "Uso: `/adjuntos <nº>` (lanza /hoy o /buscar primero).")
+                    return
+                send_telegram(chat_id, "Uso: `/adjuntos <nº>` donde nº sale en la última lista.")
+                return
+            mapping = last_results.get(str(chat_id), {})
+            real_id = mapping.get(msg_id, msg_id)  # allow short id or real id
+            send_telegram(chat_id, "📎 Descargando adjuntos...")
+            atts = get_attachment(real_id)
+            if atts is None:
+                send_telegram(chat_id, "❌ Error al acceder a los adjuntos.")
+            elif not atts:
+                send_telegram(chat_id, "Ese mensaje no tiene adjuntos descargables.")
+            else:
+                os.makedirs(ATTACH_DIR, exist_ok=True)
+                filenames = []
+                for att in atts:
+                    fpath = os.path.join(ATTACH_DIR, att["name"])
+                    data = base64.b64decode(att["bytes"])
+                    with open(fpath, "wb") as f:
+                        f.write(data)
+                    filenames.append(f"{att['name']} ({len(data)} bytes)")
+                send_telegram(chat_id,
+                    "📎 *Adjuntos guardados en el servidor:*\n\n" +
+                    "\n".join(f"  • {n}" for n in filenames))
+
+        elif cmd.startswith("/"):
+            send_telegram(chat_id, "Comando no reconocido.", reply_markup=main_keyboard())
+
+        else:
+            send_telegram(chat_id, main_menu_text(), reply_markup=main_keyboard())
+
+    except Exception as e:
+        log(f"Message error: {e}")
 
 if __name__ == "__main__":
     main()
