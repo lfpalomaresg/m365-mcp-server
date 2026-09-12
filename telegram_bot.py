@@ -71,8 +71,19 @@ last_results = {}   # {chat_id_str: {short_id: message_id}}
 def save_state():
     try:
         os.makedirs(DIST_DIR, exist_ok=True)
+        # No persistimos cuerpos de email ni destinatario para evitar leaks
+        safe_state = {}
+        for cid, s in user_state.items():
+            ss = {"state": s.get("state")}
+            if s.get("state") == "waiting_confirm":
+                ss["to"] = s.get("to", "")
+                ss["subject"] = s.get("subject", "")
+                ss["has_body"] = True  # indicador, no el cuerpo
+            elif s.get("reply_to"):
+                ss["reply_to"] = s["reply_to"]
+            safe_state[str(cid)] = ss
         with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"user_state": user_state, "last_results": last_results}, f, ensure_ascii=False)
+            json.dump({"user_state": safe_state, "last_results": last_results}, f, ensure_ascii=False)
     except Exception as e:
         log(f"save_state error: {e}")
 
@@ -83,6 +94,8 @@ def load_state():
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 user_state = data.get("user_state", {})
+                # Convert string keys back to int
+                user_state = {int(k): v for k, v in user_state.items()}
                 last_results = data.get("last_results", {})
     except Exception as e:
         log(f"load_state error: {e}")
@@ -115,11 +128,19 @@ def make_request(url, method="GET", headers=None, body=None, timeout=40):
                 return {"_status": res.status}
             return json.loads(raw)
     except urllib.error.HTTPError as e:
-        log(f"HTTP {e.code} on {url}: {e.reason}")
+        log(f"HTTP {e.code} on {sanitize_url(url)}: {e.reason}")
         return {"_error": f"http_{e.code}"}
     except Exception as e:
-        log(f"HTTP error on {url}: {e}")
+        log(f"HTTP error on {sanitize_url(url)}: {e}")
         return None
+
+
+def sanitize_url(url):
+    """Strip query params (search terms, ids) from a URL before logging."""
+    base = url.split("?")[0]
+    # Keep the path but drop anything after '?' which may contain PII/search terms.
+    # Also mask message/folder ids (long base64-like tokens) in the path.
+    return re.sub(r"/[A-Za-z0-9_\-]{20,}", "/<id>", base)
 
 def send_telegram(chat_id, text, reply_markup=None):
     make_request(
@@ -733,15 +754,19 @@ def handle_callback(chat_id, data, cb_id):
 
         if data == "confirm_send":
             st = user_state.get(chat_id, {})
-            if st.get("state") == "waiting_confirm":
-                ok = send_email_via_graph(st["to"], st["subject"], st["body"])
+            if st.get("state") != "waiting_confirm" or not st.get("to") or "body" not in st:
                 user_state.pop(chat_id, None)
                 save_state()
                 send_telegram(chat_id,
-                    f"✅ Correo enviado a *{st['to']}*." if ok else "❌ No se pudo enviar.",
+                    "La sesion anterior expiro. Inicia un nuevo /enviar.",
                     reply_markup=main_keyboard())
-            else:
-                answer_callback(cb_id, "Sesion expirada")
+                return
+            ok = send_email_via_graph(st["to"], st["subject"], st["body"])
+            user_state.pop(chat_id, None)
+            save_state()
+            send_telegram(chat_id,
+                f"✅ Correo enviado a *{st['to']}*." if ok else "❌ No se pudo enviar.",
+                reply_markup=main_keyboard())
             return
 
         # Email actions: leido:N / archivar:N / eliminar:N / responder:N
@@ -814,6 +839,13 @@ def handle_message(chat_id, text):
                 return
 
             if state_name == "waiting_confirm":
+                if "body" not in st:
+                    user_state.pop(chat_id, None)
+                    save_state()
+                    send_telegram(chat_id,
+                        "La sesion anterior expiro. Inicia un nuevo /enviar.",
+                        reply_markup=main_keyboard())
+                    return
                 send_telegram(chat_id,
                     "Usa los botones *Confirmar* o *Cancelar*.",
                     reply_markup=confirm_keyboard("confirm_send"))

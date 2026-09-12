@@ -17,7 +17,15 @@ import {
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
-const CLIENT_ID = process.env.CLIENT_ID ?? "1950a258-227b-4e31-a9cf-717495945fc2";
+function requireEnv(name: string): string {
+  const v = process.env[name];
+  if (!v) {
+    throw new Error(`${name} must be set in .env file. Copy .env.example to .env and fill in your values.`);
+  }
+  return v;
+}
+
+const CLIENT_ID = requireEnv("CLIENT_ID");
 const TENANT_ID = process.env.TENANT_ID ?? "common";
 
 // Raíz del proyecto (un nivel por encima de dist/). Claude Code arranca este server desde

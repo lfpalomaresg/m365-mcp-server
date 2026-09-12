@@ -1,17 +1,24 @@
 import { PublicClientApplication, type ICachePlugin, type TokenCacheContext } from "@azure/msal-node";
 import * as dotenv from "dotenv";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
-const CLIENT_ID = process.env.CLIENT_ID ?? "1950a258-227b-4e31-a9cf-717495945fc2";
+function requireEnv(name: string): string {
+  const v = process.env[name];
+  if (!v) {
+    throw new Error(`${name} must be set in .env file.`);
+  }
+  return v;
+}
+
+const CLIENT_ID = requireEnv("CLIENT_ID");
 const TENANT_ID = process.env.TENANT_ID ?? "common";
 
-const PROJECT_ROOT = path.join(__dirname, "..");
-const resolveFromRoot = (p: string) => (path.isAbsolute(p) ? p : path.join(PROJECT_ROOT, p)); 
-
-const TOKEN_CACHE_PATH = resolveFromRoot(process.env.TOKEN_CACHE_PATH ?? ".token_cache.json");
+const TOKEN_DIR = path.join(os.homedir(), ".m365-mcp");
+const TOKEN_CACHE_PATH = path.join(TOKEN_DIR, ".token_cache.json");
 
 const GRAPH_SCOPES = [
   "Mail.Read",
