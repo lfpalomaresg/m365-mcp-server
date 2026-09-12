@@ -7,6 +7,7 @@ import { Client, ResponseType } from "@microsoft/microsoft-graph-client";
 import "isomorphic-fetch";
 import * as dotenv from "dotenv";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import {
   createOneDriveFolder,
@@ -28,16 +29,14 @@ function requireEnv(name: string): string {
 const CLIENT_ID = requireEnv("CLIENT_ID");
 const TENANT_ID = process.env.TENANT_ID ?? "common";
 
-// Raíz del proyecto (un nivel por encima de dist/). Claude Code arranca este server desde
-// un CWD arbitrario (normalmente el HOME del usuario), así que NUNCA hay que confiar en rutas
-// relativas al CWD: una ruta relativa en .env haría que el token no se encuentre y el server
-// respondería "No active session found" aunque la sesión exista. Por eso resolvemos siempre
-// TOKEN_CACHE_PATH a una ruta absoluta anclada a la raíz del proyecto. (Bug histórico, ver README.)
-const PROJECT_ROOT = path.join(__dirname, "..");
-const resolveFromRoot = (p: string) => (path.isAbsolute(p) ? p : path.join(PROJECT_ROOT, p));
+const TOKEN_CACHE_DIR = path.join(os.homedir(), ".m365-mcp");
+const TOKEN_CACHE_PATH = process.env.TOKEN_CACHE_PATH ?
+  process.env.TOKEN_CACHE_PATH :
+  path.join(TOKEN_CACHE_DIR, ".token_cache.json");
+const DOWNLOAD_PATH = process.env.DOWNLOAD_PATH ??
+  path.join(os.homedir(), "Downloads", "m365-mcp");
 
-const TOKEN_CACHE_PATH = resolveFromRoot(process.env.TOKEN_CACHE_PATH ?? ".token_cache.json");
-const DOWNLOAD_PATH = process.env.DOWNLOAD_PATH ?? path.join(process.env.HOME ?? "~", "Downloads", "m365-mcp");
+// ─── Token Cache ──────────────────────────────────────────────────────────────
 
 const GRAPH_SCOPES = [
   "User.Read",
@@ -47,14 +46,6 @@ const GRAPH_SCOPES = [
   "Calendars.ReadWrite",
   "Files.ReadWrite.All",
   "Tasks.ReadWrite",
-  "Contacts.ReadWrite",
-  "Notes.ReadWrite",
-  "OnlineMeetings.ReadWrite",
-  "People.Read",
-  "Presence.Read",
-  "Sites.ReadWrite.All",
-  "Chat.ReadWrite",
-  "MailboxSettings.ReadWrite",
   "offline_access",
 ];
 
