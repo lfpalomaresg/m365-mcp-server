@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "test": "npm run build && node --test test/*.test.mjs && python -m pytest test/test_bot.py -q",
     "start": "node dist/index.js",
     "auth": "node dist/auth.js",
     "dev": "ts-node src/index.ts",

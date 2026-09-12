@@ -1,15 +1,19 @@
-# M365 Personal Suite — MCP Server for Claude Code
+# M365 Personal Suite — MCP Server + Telegram Bot
 
-Servidor MCP local que conecta tu cuenta personal de **Microsoft 365** a **Claude Code** mediante la API de Microsoft Graph. Permite a Claude leer y escribir correos, archivos de OneDrive, eventos de calendario, tareas y más — directamente desde el terminal.
+Servidor MCP local que conecta tu cuenta personal de **Microsoft 365** a **Claude Code** mediante la API de Microsoft Graph, más un **bot de Telegram** (`telegram_bot.py`) para gestionar el correo desde el móvil. Sin dependencias externas en el bot (stdlib puro de Python).
 
 ---
 
-## Herramientas disponibles (9 tools)
+## Herramientas del servidor MCP (13 tools)
 
 ### OneDrive & Excel
 | Tool | Descripción |
 |------|-------------|
 | `search_onedrive_files` | Buscar archivos por nombre, extensión o palabra clave |
+| `list_onedrive_folder` | Listar carpetas de OneDrive |
+| `get_onedrive_item_metadata` | Metadatos de un archivo/carpeta |
+| `create_onedrive_folder` | Crear carpeta |
+| `move_onedrive_item` | Mover archivo/carpeta por ID estable |
 | `download_onedrive_file` | Leer contenido de archivos texto/JSON/CSV o descargar binarios |
 | `upload_onedrive_file` | Crear o sobrescribir archivos en OneDrive |
 | `update_excel_sheet` | Leer o escribir celdas y rangos en libros Excel |
@@ -29,9 +33,52 @@ Servidor MCP local que conecta tu cuenta personal de **Microsoft 365** a **Claud
 
 ---
 
+## Bot de Telegram
+
+Bot conversacional para gestionar el correo desde el móvil (Windows/Mac/móvil, independiente de las apps de escritorio).
+
+```bash
+npm run bot   # arranca telegram_bot.py en modo polling
+```
+
+| Comando | Descripción |
+|---------|-------------|
+| `/hoy` | Correos sin leer recibidos hoy |
+| `/clasifica` | Propone mover correos por taxonomía de carpetas |
+| `/aplicar` | Ejecuta la clasificación propuesta |
+| `/buscar <texto>` | Búsqueda full-text en el buzón |
+| `/ver <nº>` | Lee el cuerpo completo de un correo |
+| `/enviar` | Enviar un correo paso a paso (destinatario → asunto → cuerpo) |
+| `/responder <nº> <texto>` | Responde a un correo |
+| `/calendario` | Eventos de hoy |
+| `/tareas` | Tareas pendientes de To-Do |
+| `/adjuntos <nº>` | Descarga adjuntos a `dist/attachments/` |
+
+Además de comandos, el bot muestra **botones inline** (`Hoy`, `Clasificar`, `Buscar`, `Enviar`, `Calendario`, `Tareas`) y **botones de acción** por correo (`Leído`, `Archivar`, `Eliminar`, `Responder`).
+
+### Configuración del bot (.env)
+
+```env
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+TELEGRAM_ALLOWED_USER_ID=123456789
+# Opcional — notificaciones push de remitentes importantes
+TELEGRAM_IMPORTANT_SENDERS=jefe@empresa.com,contabilidad
+TELEGRAM_NOTIFY_INTERVAL=120
+```
+
+### Estado y logs
+
+- Conversaciones en curso → `dist/_bot_state.json` (persisten reinicios)
+- Logs → `dist/bot.log`
+- Plan de clasificación → `dist/_bot_plan.json`
+- Adjuntos descargados → `dist/attachments/`
+
+---
+
 ## Requisitos
 
 - Node.js v18+
+- Python 3.8+ (para el bot, solo stdlib)
 - Cuenta Microsoft 365 personal (Outlook, OneDrive, etc.)
 - App Registration en Azure con soporte para cuentas personales
 - Claude Code CLI
@@ -122,8 +169,10 @@ Una vez registrado y autenticado, habla con Claude directamente:
 
 ```bash
 npm run build   # Compilar TypeScript
-npm run auth    # Autenticación inicial (PKCE flow)
+npm run test    # Tests MCP (JS) + bot (Python)
+npm run auth    # Autenticacion inicial (PKCE flow)
 npm start       # Arrancar servidor MCP manualmente
+npm run bot     # Arrancar el bot de Telegram
 ```
 
 ---
