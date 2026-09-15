@@ -12,9 +12,9 @@
 - LLM por defecto: alias `local-fast` vía LiteLLM (`:4000`) en código y `.env`; `qwen/qwen3.8-27b` salió del stack (bloqueaba el arranque de opencode).
 - `taxonomy.json` a `.gitignore` (contiene nombres de personas).
 - Tests: +7 con rojo visto → verdes. Ejecutar con `cd test && python3 -m unittest test_bot` (desde la raíz, `-m unittest test.test_bot` choca con el paquete `test` de la stdlib).
+- Auto-clasificación (decisión del operador, mismo día): keywords como palabra completa (antes `agua` casaba «paraguas» y `cargo` «encargo»); por defecto **propone** con botón Aplicar y no repite la misma propuesta en cada intervalo (`auto_classify_tick`); `TELEGRAM_AUTO_CLASSIFY_APPLY=true` recupera el mover sin confirmar. +4 tests con rojo visto.
 
 ### Pendiente
-- Decisión del operador sobre la auto-clasificación: mueve no leídos cada 10 min sin confirmar y las keywords casan por subcadena (`agua` casa con «paraguas», `cargo` con «encargo»).
 - Los nombres de personas siguen en el fallback hardcodeado de `load_taxonomy()` (ya estaban commiteados antes de esta sesión).
 
 ### Decidido

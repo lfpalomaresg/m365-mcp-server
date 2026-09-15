@@ -70,6 +70,8 @@ IMPORTANT_SENDERS = [s.strip().lower() for s in env.get("TELEGRAM_IMPORTANT_SEND
 NOTIFY_CHECK_SECONDS = int(env.get("TELEGRAM_NOTIFY_INTERVAL", "120"))
 AUTO_CLASSIFY_SECONDS = int(env.get("TELEGRAM_AUTO_CLASSIFY_INTERVAL", "0"))  # 0 = disabled
 AUTO_CLASSIFY_NOTIFY = env.get("TELEGRAM_AUTO_CLASSIFY_NOTIFY", "true").lower() == "true"
+# 2026-09-16: por defecto la auto-clasificación PROPONE (botón Aplicar). "true" = mueve sin confirmar.
+AUTO_CLASSIFY_APPLY = env.get("TELEGRAM_AUTO_CLASSIFY_APPLY", "false").lower() == "true"
 # 2026-09-16: alias LiteLLM del explorador residente del stack (nunca un modelo fijo de LM Studio:
 # el qwen3.8-27b que había aquí ocupaba 16 GB y bloqueaba el arranque de opencode).
 LLM_API_URL = env.get("TELEGRAM_LLM_URL", "http://localhost:4000/v1/chat/completions")
@@ -491,6 +493,11 @@ _taxonomy_mtime = 0
 TAXONOMY = []  # [{folder, keywords, if_sender?, if_subject_contains?}]
 _keyword_index = {}  # {keyword_lower: folder} para rules sin condiciones
 
+def _kw_in(kw, text):
+    """Keyword como palabra completa (2026-09-16: por subcadena «agua» casaba «paraguas»
+    y «cargo» casaba «encargo»). Admite keywords de varias palabras."""
+    return re.search(r"(?<!\w)" + re.escape(kw) + r"(?!\w)", text) is not None
+
 def _build_keyword_index(rules):
     """Índice plano keyword→folder para rules sin condiciones adicionales."""
     idx = {}
@@ -584,7 +591,7 @@ def classify_unread(chat_id=None, apply_now=False):
 
         # 1. Fast path: keyword index (rules sin condiciones)
         for kw, fld in kw_index.items():
-            if kw in text:
+            if _kw_in(kw, text):
                 folder = fld
                 break
 
@@ -597,7 +604,7 @@ def classify_unread(chat_id=None, apply_now=False):
                 if match and rule.get("if_subject_contains") and rule["if_subject_contains"] not in subj:
                     match = False
                 if match and rule.get("keywords"):
-                    if not any(kw in text for kw in rule["keywords"]):
+                    if not any(_kw_in(kw, text) for kw in rule["keywords"]):
                         match = False
                 if match:
                     folder = rule["folder"]
@@ -687,6 +694,35 @@ def apply_plan(proposed=None):
     if retried:
         result += f"  |  🔄 Reintentados: {retried}"
     return result
+
+_last_auto_proposal = frozenset()
+
+def auto_classify_tick():
+    """Una pasada de auto-clasificación. Devuelve el texto a enviar o None.
+    Por defecto PROPONE (el llamador añade el botón Aplicar) y solo avisa si la propuesta
+    cambió desde la última vez, para no repetirla cada intervalo. Con
+    TELEGRAM_AUTO_CLASSIFY_APPLY=true mueve sin confirmar (comportamiento anterior al 16/09)."""
+    global _last_auto_proposal
+    stats["last_classify"] = datetime.now().isoformat()
+    stats["classified_total"] += 1
+    if AUTO_CLASSIFY_APPLY:
+        result = classify_unread(apply_now=True)
+        if result and "Movidos" in result and "Movidos: 0" not in result:
+            return result
+        return None
+    resp = classify_unread(chat_id=ALLOWED_USER_ID)
+    if not resp or not resp.startswith("📋"):
+        _last_auto_proposal = frozenset()
+        return None
+    try:
+        with open(PLAN_FILE, "r", encoding="utf-8") as f:
+            ids = frozenset(p.get("id") for p in json.load(f))
+    except (OSError, json.JSONDecodeError):
+        ids = frozenset()
+    if ids and ids == _last_auto_proposal:
+        return None
+    _last_auto_proposal = ids
+    return resp
 
 # ─── Search / Calendar / Tasks ─────────────────────────────────────────────────
 
@@ -965,7 +1001,8 @@ def main():
     _last_auto_classify = 0.0
     stats["start_time"] = datetime.now().isoformat()
     if AUTO_CLASSIFY_SECONDS > 0:
-        log(f"Auto-classify enabled: every {AUTO_CLASSIFY_SECONDS}s")
+        modo = "mueve sin confirmar" if AUTO_CLASSIFY_APPLY else "propone con botón Aplicar"
+        log(f"Auto-classify enabled: every {AUTO_CLASSIFY_SECONDS}s ({modo})")
     if LLM_ENABLED:
         log(f"Natural language enabled: {LLM_MODEL}")
         # Warm-up: primera llamada al LLM para que el modelo cargue en caliente
@@ -1000,13 +1037,15 @@ def main():
             # Auto-classify
             if AUTO_CLASSIFY_SECONDS > 0 and now - _last_auto_classify > AUTO_CLASSIFY_SECONDS:
                 _last_auto_classify = now
-                stats["last_classify"] = datetime.now().isoformat()
-                result = classify_unread(apply_now=True)
-                stats["classified_total"] += 1
-                if result and "Movidos" in result:
-                    if AUTO_CLASSIFY_NOTIFY and ("Movidos: 0" not in result):
-                        send_telegram(ALLOWED_USER_ID, f"🤖 *Auto-clasificacion:* {result}")
-                    log(f"Auto-classify: {result}")
+                msg = auto_classify_tick()
+                if msg and AUTO_CLASSIFY_APPLY:
+                    if AUTO_CLASSIFY_NOTIFY:
+                        send_telegram(ALLOWED_USER_ID, f"🤖 *Auto-clasificacion:* {msg}")
+                    log(f"Auto-classify: {msg}")
+                elif msg:
+                    send_telegram(ALLOWED_USER_ID, f"🤖 *Auto-clasificacion (propuesta)*\n\n{msg}",
+                                  reply_markup=confirm_keyboard("confirm_aplicar"))
+                    log("Auto-classify: propuesta enviada")
 
             # Poll Telegram
             url = f"{TELEGRAM_API_URL}/getUpdates?offset={offset}&timeout=30"

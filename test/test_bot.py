@@ -271,5 +271,75 @@ class TestTokenCache(unittest.TestCase):
                 self.assertEqual(bot._read_token_from_cache(), (None, None))
 
 
+class _ClassifyFixture(unittest.TestCase):
+    """Taxonomía y plan en temporal; Graph y Telegram simulados."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (bot.TAXONOMY, bot._keyword_index, bot.PLAN_FILE, bot.DIST_DIR, bot.TAXONOMY_FILE)
+        bot.TAXONOMY_FILE = os.path.join(self.tmp.name, "no-existe.json")
+        bot.TAXONOMY = [{"folder": "PEDIDOS", "keywords": ["agua", "pedido"]},
+                        {"folder": "01_OPERATIVA/03_FINANZAS", "keywords": ["cargo"]}]
+        bot._keyword_index = bot._build_keyword_index(bot.TAXONOMY)
+        bot.PLAN_FILE = os.path.join(self.tmp.name, "plan.json")
+        bot.DIST_DIR = self.tmp.name
+        self.p_load = mock.patch.object(bot, "load_taxonomy")
+        self.p_load.start()
+
+    def tearDown(self):
+        self.p_load.stop()
+        (bot.TAXONOMY, bot._keyword_index, bot.PLAN_FILE, bot.DIST_DIR, bot.TAXONOMY_FILE) = self.saved
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _mail(mid, subject, body=""):
+        return {"id": mid, "subject": subject, "bodyPreview": body,
+                "from": {"emailAddress": {"name": "Remitente", "address": "r@example.com"}}}
+
+
+class TestKeywordWholeWord(_ClassifyFixture):
+    """2026-09-16: las keywords casaban por subcadena («agua» en «paraguas», «cargo» en «encargo»)."""
+
+    def _classify(self, emails):
+        with mock.patch.object(bot, "fetch_unread", return_value=emails):
+            return bot.classify_unread(apply_now=False)
+
+    def test_substring_does_not_match(self):
+        resp = self._classify([self._mail("M1", "Me dejé el paraguas"), self._mail("M2", "Tu encargo está listo")])
+        self.assertFalse(resp.startswith("📋"), resp)
+
+    def test_whole_word_matches(self):
+        resp = self._classify([self._mail("M1", "Pedido de agua para el lunes")])
+        self.assertTrue(resp.startswith("📋"), resp)
+        self.assertIn("PEDIDOS", resp)
+
+
+class TestAutoClassifyProposes(_ClassifyFixture):
+    """La auto-clasificación propone con botón de confirmar; no mueve correos sola ni repite la propuesta."""
+
+    def test_proposes_without_moving_and_does_not_repeat(self):
+        emails = [self._mail("M1", "Pedido de agua para el lunes")]
+        with mock.patch.object(bot, "fetch_unread", return_value=emails), \
+             mock.patch.object(bot, "apply_plan") as apply_plan, \
+             mock.patch.object(bot, "AUTO_CLASSIFY_APPLY", False, create=True):
+            bot._last_auto_proposal = frozenset()
+            first = bot.auto_classify_tick()
+            second = bot.auto_classify_tick()
+        apply_plan.assert_not_called()
+        self.assertIsNotNone(first)
+        self.assertTrue(first.startswith("📋"), first)
+        self.assertIsNone(second)
+
+    def test_apply_mode_still_available_by_flag(self):
+        emails = [self._mail("M9", "Pedido de agua")]
+        with mock.patch.object(bot, "fetch_unread", return_value=emails), \
+             mock.patch.object(bot, "apply_plan", return_value="✅ Movidos: 1  |  ❌ Fallidos: 0") as apply_plan, \
+             mock.patch.object(bot, "AUTO_CLASSIFY_APPLY", True, create=True):
+            bot._last_auto_proposal = frozenset()
+            result = bot.auto_classify_tick()
+        apply_plan.assert_called_once()
+        self.assertIn("Movidos: 1", result)
+
+
 if __name__ == "__main__":
     unittest.main()
