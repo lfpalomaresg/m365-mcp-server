@@ -3,10 +3,13 @@
 Run with: python -m unittest test.test_bot
 or:        python -m pytest test/test_bot.py
 """
+import json
 import os
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timezone
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -170,6 +173,102 @@ class TestSanitizeUrl(unittest.TestCase):
     def test_clean_url_passes_through(self):
         clean = bot.sanitize_url("https://graph.microsoft.com/v1.0/me")
         self.assertEqual(clean, "https://graph.microsoft.com/v1.0/me")
+
+
+class TestTokenRedaction(unittest.TestCase):
+    """2026-09-16: el token del bot salía en claro en dist/bot.log (68 líneas del 13 al 15/09)."""
+
+    def test_sanitize_url_masks_telegram_token(self):
+        url = "https://api.telegram.org/bot123456789:AAHfake_Token-abcdefghijklmnopqrstu/getUpdates?offset=1"
+        clean = bot.sanitize_url(url)
+        self.assertNotIn("AAHfake_Token", clean)
+        self.assertNotIn("123456789:", clean)
+
+    def test_log_never_writes_bot_token(self):
+        with tempfile.TemporaryDirectory() as d:
+            old_dir, old_file = bot.DIST_DIR, bot.LOG_FILE
+            bot.DIST_DIR, bot.LOG_FILE = d, os.path.join(d, "bot.log")
+            try:
+                with mock.patch("builtins.print"):
+                    bot.log(f"HTTP error on {bot.TELEGRAM_API_URL}/getUpdates: boom")
+                with open(bot.LOG_FILE, encoding="utf-8") as f:
+                    content = f.read()
+            finally:
+                bot.DIST_DIR, bot.LOG_FILE = old_dir, old_file
+        self.assertNotIn(bot.BOT_TOKEN, content)
+        self.assertIn("getUpdates", content)
+
+
+class TestNaturalLanguageReply(unittest.TestCase):
+    """Una respuesta interpretada por el LLM no puede enviarse sin confirmación ni volcarse al log."""
+
+    CHAT = 999
+
+    def setUp(self):
+        bot.user_state.pop(self.CHAT, None)
+        bot.last_results[str(self.CHAT)] = {"2": "MSGID2"}
+        self.patches = {n: mock.patch.object(bot, n) for n in
+                        ("send_telegram", "save_state", "reply_message", "log", "answer_callback")}
+        self.m = {n: p.start() for n, p in self.patches.items()}
+        self.m["reply_message"].return_value = True
+
+    def tearDown(self):
+        for p in self.patches.values():
+            p.stop()
+        bot.user_state.pop(self.CHAT, None)
+        bot.last_results.pop(str(self.CHAT), None)
+
+    def _nl(self, text="contesta al 2 que vale, mañana"):
+        nl = {"action": "responder", "params": {"num": "2", "text": "vale, mañana"}}
+        with mock.patch.object(bot, "interpret_nl", return_value=nl), mock.patch.object(bot, "LLM_ENABLED", True):
+            bot.handle_message(self.CHAT, text)
+
+    def test_nl_reply_asks_confirmation_instead_of_sending(self):
+        self._nl()
+        self.m["reply_message"].assert_not_called()
+        st = bot.user_state.get(self.CHAT, {})
+        self.assertEqual(st.get("state"), "waiting_confirm_reply")
+        self.assertEqual(st.get("reply_to"), "MSGID2")
+
+    def test_confirm_reply_callback_sends(self):
+        self._nl()
+        bot.handle_callback(self.CHAT, "confirm_reply", "cb1")
+        self.m["reply_message"].assert_called_once_with("MSGID2", "vale, mañana")
+        self.assertNotIn(self.CHAT, bot.user_state)
+
+    def test_nl_does_not_log_user_text(self):
+        self._nl()
+        logged = " ".join(str(c.args[0]) for c in self.m["log"].call_args_list if c.args)
+        self.assertNotIn("vale, mañana", logged)
+        self.assertNotIn("contesta al 2", logged)
+
+
+class TestAlertRegistration(unittest.TestCase):
+    """Un aviso de correo importante no puede machacar la última lista (/hoy, /buscar)."""
+
+    def tearDown(self):
+        bot.last_results.clear()
+
+    def test_alert_does_not_clobber_last_list(self):
+        bot.last_results["42"] = {"1": "LISTA1", "2": "LISTA2"}
+        with mock.patch.object(bot, "save_state"):
+            short = bot.register_alert(42, "ALERTA")
+        self.assertEqual(bot.last_results["42"]["1"], "LISTA1")
+        self.assertEqual(bot.last_results["42"][short], "ALERTA")
+        self.assertNotIn(short, ("1", "2"))
+
+
+class TestTokenCache(unittest.TestCase):
+    """Sin un access token de Mail en la caché no se debe devolver otro cualquiera."""
+
+    def test_no_fallback_to_unrelated_token(self):
+        cache = {"AccessToken": {"k": {"target": "Files.Read", "secret": "OTRO", "expires_on": "9999999999"}}}
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "cache.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(cache, f)
+            with mock.patch.object(bot, "TOKEN_CACHE_PATH", p):
+                self.assertEqual(bot._read_token_from_cache(), (None, None))
 
 
 if __name__ == "__main__":

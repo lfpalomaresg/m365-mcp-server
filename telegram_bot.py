@@ -25,8 +25,13 @@ ATTACH_DIR = os.path.join(DIST_DIR, "attachments")
 
 # ─── Logging ───────────────────────────────────────────────────────────────────
 
+def _redact(text):
+    """Nunca escribir el token del bot: va dentro de la URL de la API de Telegram
+    (2026-09-16: salía en claro en dist/bot.log en cada error de red)."""
+    return re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot<token>", str(text))
+
 def log(msg):
-    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {_redact(msg)}"
     print(line)
     try:
         os.makedirs(DIST_DIR, exist_ok=True)
@@ -63,6 +68,66 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 IMPORTANT_SENDERS = [s.strip().lower() for s in env.get("TELEGRAM_IMPORTANT_SENDERS", "").split(",") if s.strip()]
 NOTIFY_CHECK_SECONDS = int(env.get("TELEGRAM_NOTIFY_INTERVAL", "120"))
+AUTO_CLASSIFY_SECONDS = int(env.get("TELEGRAM_AUTO_CLASSIFY_INTERVAL", "0"))  # 0 = disabled
+AUTO_CLASSIFY_NOTIFY = env.get("TELEGRAM_AUTO_CLASSIFY_NOTIFY", "true").lower() == "true"
+# 2026-09-16: alias LiteLLM del explorador residente del stack (nunca un modelo fijo de LM Studio:
+# el qwen3.8-27b que había aquí ocupaba 16 GB y bloqueaba el arranque de opencode).
+LLM_API_URL = env.get("TELEGRAM_LLM_URL", "http://localhost:4000/v1/chat/completions")
+LLM_MODEL = env.get("TELEGRAM_LLM_MODEL", "local-fast")
+LLM_ENABLED = env.get("TELEGRAM_LLM_ENABLED", "true").lower() == "true"
+
+SYSTEM_PROMPT = """Eres el asistente de correo M365. Tu tarea es interpretar mensajes en español y decidir qué acción ejecutar. Responde SIEMPRE solo con un JSON válido, sin explicaciones ni markdown.
+
+Acciones disponibles:
+- hoy: mostrar correos sin leer recibidos hoy
+- clasifica: clasificar y mover correos no leídos según reglas
+- buscar: buscar correos por texto. params: query (texto a buscar)
+- calendario: ver eventos de hoy
+- tareas: ver tareas pendientes
+- enviar: enviar un correo. params: to (destinatario), subject (asunto), body (cuerpo)
+- ver: leer un correo específico. params: num (número del correo en la última lista)
+- responder: responder a un correo. params: num (número), text (respuesta)
+- stats: ver estadísticas del bot
+- unknown: no se entiende o no es una acción de correo
+
+Responde con el JSON exacto. Ejemplos:
+Usuario: "¿tengo correos nuevos?"
+Respuesta: {"action": "hoy"}
+
+Usuario: "busca correos de Juan"
+Respuesta: {"action": "buscar", "params": {"query": "Juan"}}
+
+Usuario: "manda un correo a María asunto reunión cuerpo nos vemos mañana"
+Respuesta: {"action": "enviar", "params": {"to": "María", "subject": "reunión", "body": "nos vemos mañana"}}
+
+Usuario: "¿qué tiempo hace?"
+Respuesta: {"action": "unknown"}
+
+Usuario: "clasifica mis correos"
+Respuesta: {"action": "clasifica"}
+
+Usuario: "qué tareas tengo"
+Respuesta: {"action": "tareas"}
+
+Usuario: "leo el correo 3"
+Respuesta: {"action": "ver", "params": {"num": "3"}}
+
+Usuario: "responde al 2 diciendo que mañana a las 10"
+Respuesta: {"action": "responder", "params": {"num": "2", "text": "mañana a las 10"}}
+
+Usuario: "cómo va el bot"
+Respuesta: {"action": "stats"}"""
+
+# ─── Stats ──────────────────────────────────────────────────────────────────────
+
+stats = {
+    "classified_total": 0,
+    "moved_total": 0,
+    "failed_total": 0,
+    "api_calls": 0,
+    "last_classify": None,
+    "start_time": None,
+}
 
 # ─── Persistent state ──────────────────────────────────────────────────────────
 
@@ -103,7 +168,46 @@ def load_state():
 
 # ─── Token & HTTP ──────────────────────────────────────────────────────────────
 
+TOKEN_CACHE_PATH = os.path.join(os.path.expanduser("~"), ".m365-mcp", ".token_cache.json")
+GRAPH_SCOPES_STR = "Mail.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Files.ReadWrite.All Tasks.ReadWrite offline_access"
+
+def _read_token_from_cache():
+    """Lee el access token directamente del cache MSAL sin spawnear Node.js.
+    Retorna (token, expires_on) o (None, None)."""
+    try:
+        if not os.path.exists(TOKEN_CACHE_PATH):
+            return None, None
+        with open(TOKEN_CACHE_PATH, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+        at_section = cache.get("AccessToken", {})
+        if not at_section:
+            return None, None
+        # Buscar el token con el target que necesitamos (Mail.Read etc.)
+        for entry in at_section.values():
+            if not isinstance(entry, dict):
+                continue
+            target = entry.get("target", "")
+            if "Mail.Read" in target and "offline_access" in target:
+                secret = entry.get("secret")
+                expires = entry.get("expires_on")
+                if secret and expires:
+                    return secret, expires
+        # Sin token de Mail no se devuelve otro cualquiera (otro scope → 401 en bucle):
+        # el fallback de Node.js refresca el correcto.
+    except (OSError, json.JSONDecodeError, KeyError, ValueError):
+        pass
+    return None, None
+
 def get_graph_token():
+    """Obtiene un token de acceso a Microsoft Graph.
+    Primero intenta leerlo del cache MSAL (Python puro, sin subprocess).
+    Si el token no existe o ha caducado, spawn ea Node.js para refrescarlo."""
+    secret, expires_on = _read_token_from_cache()
+    now = int(time.time())
+    if secret and expires_on and int(expires_on) > now + 300:
+        return secret  # Token válido con >5 min de margen
+
+    # Fallback: Node.js subprocess (MSAL se encarga del refresh)
     try:
         node_script = os.path.join(APP_DIR, "dist", "token.js")
         r = subprocess.run(["node", node_script], capture_output=True,
@@ -138,7 +242,7 @@ def make_request(url, method="GET", headers=None, body=None, timeout=40):
 
 def sanitize_url(url):
     """Strip query params (search terms, ids) from a URL before logging."""
-    base = url.split("?")[0]
+    base = _redact(url).split("?")[0]
     # Keep the path but drop anything after '?' which may contain PII/search terms.
     # Also mask message/folder ids (long base64-like tokens) in the path.
     return re.sub(r"/[A-Za-z0-9_\-]{20,}", "/<id>", base)
@@ -191,6 +295,7 @@ def _throttle_graph():
 
 def call_graph(endpoint, method="GET", body=None):
     """Llamada a Graph con throttle y backoff exponencial ante 429."""
+    stats["api_calls"] += 1
     for attempt in range(MAX_RETRIES + 1):
         _throttle_graph()
         token = get_graph_token()
@@ -246,7 +351,8 @@ def format_email_list(emails, show_ids=True):
         subj = (m.get("subject") or "Sin asunto")[:70]
         t = (m.get("receivedDateTime", "") or "")[11:16]
         prefix = f"{i}." if show_ids else "•"
-        msg += f"{prefix} [{t}] *{name}*:\n   _{subj}_\n"
+        att = "📎" if m.get("hasAttachments") else ""
+        msg += f"{prefix} [{t}] {att}*{name}*:\n   _{subj}_\n"
     msg += "\nResponde `/ver <nº>` para leerlo, o usa los botones de accion."
     return msg
 
@@ -261,9 +367,46 @@ def register_results(chat_id, emails):
     save_state()
     return mapping
 
+def register_alert(chat_id, msg_id):
+    """Registra un aviso push con id corto propio ("a1", "a2"…) SIN machacar la última
+    lista de /hoy o /buscar (antes la sustituía por {"1": aviso} y "responde al 1"
+    podía ir al correo equivocado)."""
+    mapping = last_results.setdefault(str(chat_id), {})
+    n = 1
+    while f"a{n}" in mapping:
+        n += 1
+    short = f"a{n}"
+    mapping[short] = msg_id
+    save_state()
+    return short
+
 # ─── Folder Resolution ─────────────────────────────────────────────────────────
 
+_folder_cache = {}   # {path: folder_id}, persistido en state
+CACHE_FILE = os.path.join(DIST_DIR, "_folder_cache.json")
+
+def load_folder_cache():
+    global _folder_cache
+    try:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                _folder_cache = json.load(f)
+            log(f"Folder cache loaded: {len(_folder_cache)} entries")
+    except Exception:
+        _folder_cache = {}
+
+def save_folder_cache():
+    try:
+        os.makedirs(DIST_DIR, exist_ok=True)
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(_folder_cache, f, ensure_ascii=False)
+    except Exception:
+        pass
+
 def resolve_folder_id(path):
+    if path in _folder_cache:
+        return _folder_cache[path]
+
     segments = [s.strip() for s in path.split("/") if s.strip()]
     if not segments:
         return None
@@ -288,6 +431,8 @@ def resolve_folder_id(path):
         if not found:
             return None
         current_id = found.get("id")
+    _folder_cache[path] = current_id
+    save_folder_cache()
     return current_id
 
 def get_archive_folder_id():
@@ -341,34 +486,80 @@ def reply_message(msg_id, comment):
 
 # ─── Taxonomy & Classification ─────────────────────────────────────────────────
 
-TAXONOMY = {
-    "01_OPERATIVA/01_RRHH": ["baja", "nomina", "trabajadora", "sara rengel",
-                             "rosa santos", "excedencia", "lyf", "finiquito", "contrato"],
-    "01_OPERATIVA/02_COMERCIAL_EVENTOS": ["stop sales", "cierre de ventas",
-        "tarifa fit", "ttoo", "almudena ayuso", "cierre ventas"],
-    "01_OPERATIVA/03_FINANZAS": ["arqueo", "caja", "cierre de caja",
-        "factura", "abono", "cargo", "no-show", "no show", "no presentado"],
-    "00_CONTROL_DIARIO/07_REVISAR_EVENTOS_BODAS_GRUPOS": ["grupo", "rooming",
-        "roster", "coctel", "degustacion", "ods", "orden de servicio",
-        "sunshine weddings", "rick steves", "lauren crumplin"],
-    "00_CONTROL_DIARIO/08_REVISAR_INCIDENCIAS_AVERIAS": ["sancion", "multa",
-        "incidencia", "averia", "sixt", "carcagno"],
-    "01_OPERATIVA/08_MARKETING": ["newsletter", "substack", "hosteltur",
-        "agoda", "groupon", "raiola", "eoi", "awards", "smart travel"],
-    "PEDIDOS": ["pedido", "albaran", "frutas eladio", "ly company",
-        "qualianza", "calidad pascual", "huevos", "leche", "agua"]
-}
+TAXONOMY_FILE = os.path.join(APP_DIR, "taxonomy.json")
+_taxonomy_mtime = 0
+TAXONOMY = []  # [{folder, keywords, if_sender?, if_subject_contains?}]
+_keyword_index = {}  # {keyword_lower: folder} para rules sin condiciones
+
+def _build_keyword_index(rules):
+    """Índice plano keyword→folder para rules sin condiciones adicionales."""
+    idx = {}
+    for rule in rules:
+        if rule.get("if_sender") or rule.get("if_subject_contains"):
+            continue  # estas rules se chequean individualmente
+        for kw in rule.get("keywords", []):
+            idx[kw] = rule["folder"]
+    return idx
+
+def load_taxonomy():
+    global TAXONOMY, _taxonomy_mtime, _keyword_index
+    if os.path.exists(TAXONOMY_FILE):
+        try:
+            mtime = os.path.getmtime(TAXONOMY_FILE)
+            if mtime == _taxonomy_mtime and TAXONOMY:
+                return
+            with open(TAXONOMY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            raw_rules = data.get("rules", [])
+            rules = []
+            for r in raw_rules:
+                folder = r.get("folder", "")
+                if not folder:
+                    continue
+                rule = {"folder": folder, "keywords": [k.lower() for k in r.get("keywords", [])]}
+                if r.get("if_sender"):
+                    rule["if_sender"] = r["if_sender"].lower()
+                if r.get("if_subject_contains"):
+                    rule["if_subject_contains"] = r["if_subject_contains"].lower()
+                rules.append(rule)
+            if rules:
+                TAXONOMY = rules
+                _keyword_index = _build_keyword_index(rules)
+                _taxonomy_mtime = mtime
+                cond_rules = sum(1 for r in rules if r.get("if_sender") or r.get("if_subject_contains"))
+                log(f"Taxonomy loaded from taxonomy.json: {len(TAXONOMY)} rules ({cond_rules} condicionales), {len(_keyword_index)} flat keywords")
+                return
+            else:
+                log("taxonomy.json found but contains no valid rules, using defaults")
+        except (json.JSONDecodeError, OSError) as e:
+            log(f"Error loading taxonomy.json: {e}, using defaults")
+    # Fallback: hardcoded
+    TAXONOMY = [
+        {"folder": "01_OPERATIVA/01_RRHH", "keywords": ["baja", "nomina", "trabajadora", "sara rengel", "rosa santos", "excedencia", "lyf", "finiquito", "contrato"]},
+        {"folder": "01_OPERATIVA/02_COMERCIAL_EVENTOS", "keywords": ["stop sales", "cierre de ventas", "tarifa fit", "ttoo", "almudena ayuso", "cierre ventas"]},
+        {"folder": "01_OPERATIVA/03_FINANZAS", "keywords": ["arqueo", "caja", "cierre de caja", "factura", "abono", "cargo", "no-show", "no show", "no presentado"]},
+        {"folder": "00_CONTROL_DIARIO/07_REVISAR_EVENTOS_BODAS_GRUPOS", "keywords": ["grupo", "rooming", "roster", "coctel", "degustacion", "ods", "orden de servicio", "sunshine weddings", "rick steves", "lauren crumplin"]},
+        {"folder": "00_CONTROL_DIARIO/08_REVISAR_INCIDENCIAS_AVERIAS", "keywords": ["sancion", "multa", "incidencia", "averia", "sixt", "carcagno"]},
+        {"folder": "01_OPERATIVA/08_MARKETING", "keywords": ["newsletter", "substack", "hosteltur", "agoda", "groupon", "raiola", "eoi", "awards", "smart travel"]},
+        {"folder": "PEDIDOS", "keywords": ["pedido", "albaran", "frutas eladio", "ly company", "qualianza", "calidad pascual", "huevos", "leche", "agua"]},
+    ]
+    _keyword_index = _build_keyword_index(TAXONOMY)
+    _taxonomy_mtime = 0
+    log(f"Taxonomy loaded from built-in defaults: {len(TAXONOMY)} rules")
 
 def fetch_unread(top=30):
     res = call_graph(
         f"/me/messages?$filter=isRead eq false&$top={top}"
-        "&$select=id,subject,sender,receivedDateTime,bodyPreview"
+        "&$select=id,subject,from,receivedDateTime,bodyPreview"
     )
     if not res or "_error" in res:
         return None
-    return res.get("value", [])
+    emails = res.get("value", [])
+    log(f"fetch_unread: filter=isRead eq false, returned {len(emails)} emails")
+    return emails
 
 def classify_unread(chat_id=None, apply_now=False):
+    load_taxonomy()  # recarga si taxonomy.json cambió
     emails = fetch_unread()
     if emails is None:
         return "❌ Error al conectar con Microsoft Graph."
@@ -377,21 +568,47 @@ def classify_unread(chat_id=None, apply_now=False):
         return "No tienes correos sin leer. Bandeja despejada. 🟢"
 
     proposed = []
+    kw_index = _keyword_index
+    cond_rules = [r for r in TAXONOMY if r.get("if_sender") or r.get("if_subject_contains")]
+
     for email in emails:
         subj = (email.get("subject") or "").lower()
-        sender_name = (
-            ((email.get("sender") or {}).get("emailAddress") or {}).get("name") or ""
-        ).lower()
+        from_field = email.get("from") or {}
+        sender_data = from_field.get("emailAddress") or {}
+        sender_name = (sender_data.get("name") or "").lower()
+        sender_addr = (sender_data.get("address") or "").lower()
         body = (email.get("bodyPreview") or "").lower()
         text = f"{subj} {sender_name} {body}"
 
-        folder = next((f for f, kw in TAXONOMY.items() if any(k in text for k in kw)), None)
+        folder = None
+
+        # 1. Fast path: keyword index (rules sin condiciones)
+        for kw, fld in kw_index.items():
+            if kw in text:
+                folder = fld
+                break
+
+        # 2. Condicionales: si no matcheó por keyword, evaluar rules con condiciones
+        if not folder:
+            for rule in cond_rules:
+                match = True
+                if rule.get("if_sender") and rule["if_sender"] not in f"{sender_name} {sender_addr}":
+                    match = False
+                if match and rule.get("if_subject_contains") and rule["if_subject_contains"] not in subj:
+                    match = False
+                if match and rule.get("keywords"):
+                    if not any(kw in text for kw in rule["keywords"]):
+                        match = False
+                if match:
+                    folder = rule["folder"]
+                    break
+
         if folder:
             proposed.append({
                 "id": email["id"],
                 "subject": email.get("subject", "?"),
                 "target": folder,
-                "sender": ((email.get("sender") or {}).get("emailAddress") or {}).get("name", "?")
+                "sender": sender_name
             })
 
     if not proposed:
@@ -421,6 +638,7 @@ def apply_plan(proposed=None):
 
     ok = 0
     fail = 0
+    retried = 0
     cache = {}
     for p in proposed:
         fid = cache.get(p["target"])
@@ -428,22 +646,47 @@ def apply_plan(proposed=None):
             fid = resolve_folder_id(p["target"])
             if fid:
                 cache[p["target"]] = fid
-        if fid:
-            mv = call_graph(f"/me/messages/{p['id']}/move",
-                            method="POST", body={"destinationId": fid})
-            if mv and "_error" not in mv:
-                ok += 1
-            else:
-                fail += 1
+        if not fid:
+            fail += 1
+            continue
+
+        mv = call_graph(f"/me/messages/{p['id']}/move",
+                        method="POST", body={"destinationId": fid})
+        if mv and "_error" not in mv:
+            ok += 1
+        elif mv and mv.get("_error") == "http_401":
+            # Token caducado a mitad del lote: refrescar y reintentar una vez
+            log("apply_plan: token expired, refreshing and retrying...")
+            # Forzar refresh via Node.js (salta el cache de Python)
+            try:
+                node_script = os.path.join(APP_DIR, "dist", "token.js")
+                r = subprocess.run(["node", node_script], capture_output=True,
+                                   text=True, encoding="utf-8")
+                if r.returncode == 0 and r.stdout.strip():
+                    mv2 = call_graph(f"/me/messages/{p['id']}/move",
+                                     method="POST", body={"destinationId": fid})
+                    if mv2 and "_error" not in mv2:
+                        ok += 1
+                        retried += 1
+                        continue
+            except Exception:
+                pass
+            fail += 1
         else:
             fail += 1
+
+    stats["moved_total"] += ok
+    stats["failed_total"] += fail
 
     try:
         os.remove(PLAN_FILE)
     except OSError:
         pass
 
-    return f"✅ Movidos: {ok}  |  ❌ Fallidos: {fail}"
+    result = f"✅ Movidos: {ok}  |  ❌ Fallidos: {fail}"
+    if retried:
+        result += f"  |  🔄 Reintentados: {retried}"
+    return result
 
 # ─── Search / Calendar / Tasks ─────────────────────────────────────────────────
 
@@ -591,6 +834,9 @@ def check_important_unread():
             alerts.append(m)
             _notified_ids.add(mid)
 
+    if alerts:
+        log(f"check_important_unread: {len(alerts)} important unread found (total unread: {len(res.get('value', []))})")
+
     if len(_notified_ids) > 500:
         _notified_ids = set(list(_notified_ids)[-200:])
     return alerts
@@ -607,8 +853,9 @@ def handle_hoy(chat_id):
     if err:
         return err
     emails = res.get("value", [])
+    log(f"handle_hoy: filter=isRead eq false and receivedDateTime ge {midnight}, returned {len(emails)} emails")
     if not emails:
-        return "No tienes correos sin leer recibidos hoy. 🟢"
+        return "No tienes correos sin leer recibidos hoy. 🟢\n\nPrueba /clasifica para ver todos los no leidos sin filtrar por fecha."
     register_results(chat_id, emails)
     return "📬 *Hoy (sin leer):*\n\n" + format_email_list(emails)
 
@@ -666,15 +913,66 @@ def handle_tareas(chat_id):
         msg += f"{star}• {t['title']} ({t['list']}){due}\n"
     return msg
 
+# ─── Natural Language (LLM local) ──────────────────────────────────────────────
+
+def interpret_nl(text):
+    """Interpreta lenguaje natural con el LLM local. Retorna dict con action y params, o None si falla."""
+    if not LLM_ENABLED or not text.strip():
+        return None
+    try:
+        payload = {
+            "model": LLM_MODEL,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": text}
+            ],
+            "temperature": 0.1,
+            "max_tokens": 150,
+            "stream": False
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(LLM_API_URL, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=20) as res:
+            raw = res.read().decode("utf-8")
+            result = json.loads(raw)
+        content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        content = content.strip()
+        if "{" in content and "}" in content:
+            start = content.index("{")
+            end = content.rindex("}") + 1
+            content = content[start:end]
+        parsed = json.loads(content)
+        action = parsed.get("action", "unknown")
+        params = parsed.get("params", {})
+        return {"action": action, "params": params}
+    except Exception as e:
+        log(f"LLM interpret error: {e}")
+        return None
+
+
 # ─── Main Loop ─────────────────────────────────────────────────────────────────
 
 def main():
     log("M365 Telegram Bot starting...")
     load_state()
+    load_taxonomy()
+    load_folder_cache()
     if IMPORTANT_SENDERS:
         log(f"Push notifications active for: {IMPORTANT_SENDERS}")
     offset = 0
     _last_heartbeat = 0.0
+    _last_auto_classify = 0.0
+    stats["start_time"] = datetime.now().isoformat()
+    if AUTO_CLASSIFY_SECONDS > 0:
+        log(f"Auto-classify enabled: every {AUTO_CLASSIFY_SECONDS}s")
+    if LLM_ENABLED:
+        log(f"Natural language enabled: {LLM_MODEL}")
+        # Warm-up: primera llamada al LLM para que el modelo cargue en caliente
+        try:
+            interpret_nl("hola")
+        except Exception:
+            pass
 
     while True:
         try:
@@ -689,13 +987,26 @@ def main():
                 sender_name = (
                     ((alert.get("from") or {}).get("emailAddress") or {}).get("name", "?")
                 )
+                alert_subj = alert.get("subject", "?")
+                short = register_alert(ALLOWED_USER_ID, alert.get("id", ""))
                 send_telegram(
                     ALLOWED_USER_ID,
                     f"🔔 *Correo importante sin leer*\n\n"
                     f"De: *{sender_name}*\n"
-                    f"Asunto: _{alert.get('subject', '?')}_\n\n"
-                    f"Responde /hoy para ver detalles."
+                    f"Asunto: _{alert_subj}_",
+                    reply_markup=email_actions_keyboard(short)
                 )
+
+            # Auto-classify
+            if AUTO_CLASSIFY_SECONDS > 0 and now - _last_auto_classify > AUTO_CLASSIFY_SECONDS:
+                _last_auto_classify = now
+                stats["last_classify"] = datetime.now().isoformat()
+                result = classify_unread(apply_now=True)
+                stats["classified_total"] += 1
+                if result and "Movidos" in result:
+                    if AUTO_CLASSIFY_NOTIFY and ("Movidos: 0" not in result):
+                        send_telegram(ALLOWED_USER_ID, f"🤖 *Auto-clasificacion:* {result}")
+                    log(f"Auto-classify: {result}")
 
             # Poll Telegram
             url = f"{TELEGRAM_API_URL}/getUpdates?offset={offset}&timeout=30"
@@ -805,6 +1116,19 @@ def handle_callback(chat_id, data, cb_id):
                 reply_markup=main_keyboard())
             return
 
+        if data == "confirm_reply":
+            st = user_state.get(chat_id, {})
+            user_state.pop(chat_id, None)
+            save_state()
+            if st.get("state") != "waiting_confirm_reply" or not st.get("reply_to") or not st.get("text"):
+                send_telegram(chat_id, "La sesion de respuesta expiro. Lanza /hoy o /buscar.",
+                              reply_markup=main_keyboard())
+                return
+            ok = reply_message(st["reply_to"], st["text"])
+            send_telegram(chat_id, "↩️ Respuesta enviada." if ok else "❌ Error al responder.",
+                          reply_markup=main_keyboard())
+            return
+
         # Email actions: leido:N / archivar:N / eliminar:N / responder:N
         if ":" in data:
             action, short_id = data.split(":", 1)
@@ -887,6 +1211,11 @@ def handle_message(chat_id, text):
                     reply_markup=confirm_keyboard("confirm_send"))
                 return
 
+            if state_name == "waiting_confirm_reply":
+                send_telegram(chat_id, "Usa los botones *Confirmar* o *Cancelar*.",
+                              reply_markup=confirm_keyboard("confirm_reply"))
+                return
+
             if state_name == "waiting_reply_body":
                 reply_to = st.get("reply_to")
                 user_state.pop(chat_id, None)
@@ -949,6 +1278,47 @@ def handle_message(chat_id, text):
         elif cmd == "/tareas":
             send_telegram(chat_id, handle_tareas(chat_id))
 
+        elif cmd == "/reload":
+            old_mtime = _taxonomy_mtime
+            old_folders = len(_folder_cache)
+            _folder_cache.clear()  # invalidar cache de carpetas
+            save_folder_cache()
+            load_taxonomy()
+            kl = len(_keyword_index)
+            fl = len(_folder_cache)
+            msg_parts = [f"🔄 Taxonomia recargada: {kl} keywords"]
+            if old_folders > 0:
+                msg_parts.append(f"Cache de carpetas invalidado (tenias {old_folders})")
+            send_telegram(chat_id, " | ".join(msg_parts) + ".", reply_markup=main_keyboard())
+
+        elif cmd == "/stats":
+            uptime = ""
+            if stats.get("start_time"):
+                try:
+                    started = datetime.fromisoformat(stats["start_time"])
+                    delta = datetime.now() - started
+                    h, m = divmod(int(delta.total_seconds()), 3600)
+                    m, s = divmod(m, 60)
+                    uptime = f"⏱ {h}h {m}m {s}s"
+                except Exception:
+                    pass
+            ac = "activa" if AUTO_CLASSIFY_SECONDS > 0 else "desactivada"
+            msg = (
+                f"📊 *Estadisticas del bot*\n\n"
+                f"• Clasificaciones: *{stats['classified_total']}*\n"
+                f"• Movidos: *{stats['moved_total']}*\n"
+                f"• Fallidos: *{stats['failed_total']}*\n"
+                f"• Llamadas API: *{stats['api_calls']}*\n"
+                f"• Auto-clasificar: {ac}"
+            )
+            if AUTO_CLASSIFY_SECONDS > 0:
+                msg += f" (cada {AUTO_CLASSIFY_SECONDS}s)"
+            if uptime:
+                msg += f"\n• {uptime}"
+            if stats.get("last_classify"):
+                msg += f"\n• Ultima clasif: {stats['last_classify'][:19].replace('T', ' ')}"
+            send_telegram(chat_id, msg, reply_markup=main_keyboard())
+
         elif cmd == "/adjuntos":
             parts = text.split(" ", 1)
             msg_id = parts[1].strip() if len(parts) > 1 else ""
@@ -984,7 +1354,94 @@ def handle_message(chat_id, text):
             send_telegram(chat_id, "Comando no reconocido.", reply_markup=main_keyboard())
 
         else:
-            send_telegram(chat_id, main_menu_text(), reply_markup=main_keyboard())
+            # Intentar interpretar como lenguaje natural
+            send_telegram(chat_id, "🤔 Pensando...")
+            nl = interpret_nl(text) if LLM_ENABLED else None
+            if nl and nl.get("action") != "unknown":
+                action = nl["action"]
+                params = nl.get("params", {})
+                # Sin texto ni params en el log: llevan destinatarios y cuerpos de correo (RGPD)
+                log(f"NL interpreted: action={action}")
+                if action == "hoy":
+                    send_telegram(chat_id, "📬 Buscando...")
+                    send_telegram(chat_id, handle_hoy(chat_id))
+                elif action == "clasifica":
+                    send_telegram(chat_id, "📋 Analizando...")
+                    resp = classify_unread(chat_id=chat_id)
+                    keyboard = confirm_keyboard("confirm_aplicar") if resp.startswith("📋") else main_keyboard()
+                    send_telegram(chat_id, resp, reply_markup=keyboard)
+                elif action == "buscar":
+                    query = params.get("query", "")
+                    if query:
+                        send_telegram(chat_id, f"🔍 Buscando \"{query}\"...")
+                        send_telegram(chat_id, handle_buscar(chat_id, query), reply_markup=main_keyboard())
+                    else:
+                        user_state[chat_id] = {"state": "waiting_search"}
+                        save_state()
+                        send_telegram(chat_id, "🔍 ¿Qué quieres buscar?")
+                elif action == "calendario":
+                    send_telegram(chat_id, handle_calendar(chat_id))
+                elif action == "tareas":
+                    send_telegram(chat_id, handle_tareas(chat_id))
+                elif action == "enviar":
+                    to = params.get("to", "")
+                    subj = params.get("subject", "")
+                    body_text = params.get("body", "")
+                    if to and subj and body_text:
+                        user_state[chat_id] = {
+                            "state": "waiting_confirm",
+                            "to": to,
+                            "subject": subj,
+                            "body": body_text
+                        }
+                        save_state()
+                        summary = (
+                            f"✉️ *Confirmar envio:*\n\n"
+                            f"*Para:* {to}\n"
+                            f"*Asunto:* {subj}\n"
+                            f"*Cuerpo:* {body_text[:200]}"
+                        )
+                        send_telegram(chat_id, summary, reply_markup=confirm_keyboard("confirm_send"))
+                    else:
+                        user_state[chat_id] = {"state": "waiting_to"}
+                        save_state()
+                        send_telegram(chat_id, "✉️ *Enviar correo*\n\nDestinatario (email):")
+                elif action == "ver":
+                    num = params.get("num", "")
+                    if num:
+                        body = handle_ver(chat_id, num)
+                        send_telegram(chat_id, body, reply_markup=email_actions_keyboard(num))
+                    else:
+                        send_telegram(chat_id, "¿Qué número de correo quieres leer? Usa /hoy o /buscar primero.")
+                elif action == "responder":
+                    num = params.get("num", "")
+                    reply_text = params.get("text", "")
+                    if num and reply_text:
+                        mapping = last_results.get(str(chat_id), {})
+                        msg_id = mapping.get(str(num))
+                        if msg_id:
+                            # Lo interpretó un LLM: nunca se envía sin confirmación explícita
+                            user_state[chat_id] = {"state": "waiting_confirm_reply",
+                                                   "reply_to": msg_id, "text": reply_text}
+                            save_state()
+                            send_telegram(chat_id,
+                                f"↩️ *Confirmar respuesta al nº {num}:*\n\n{reply_text[:300]}",
+                                reply_markup=confirm_keyboard("confirm_reply"))
+                        else:
+                            send_telegram(chat_id, f"No tengo el mensaje nº {num}. Lanza /hoy o /buscar primero.")
+                    else:
+                        send_telegram(chat_id, "Uso: 'responde al 3 diciendo que mañana a las 10'")
+                elif action == "stats":
+                    send_telegram(chat_id, "📊 Cargando estadísticas...")
+                    handle_message(chat_id, "/stats")  # reuse /stats handler
+                    return
+                else:
+                    send_telegram(chat_id, main_menu_text(), reply_markup=main_keyboard())
+            else:
+                send_telegram(chat_id,
+                    "🤖 No te he entendido. El modelo local esta calentando (primer mensaje tarda ~20s).\n\n"
+                    "Prueba otra vez en unos segundos, o usa los comandos con / mientras tanto.",
+                    reply_markup=main_keyboard())
 
     except Exception as e:
         log(f"Message error: {e}")

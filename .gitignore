@@ -9,3 +9,5 @@ build/
 .claude/
 __pycache__/
 .env.bak.*
+# Reglas de clasificación del bot: config local con nombres de personas (RGPD), no va a git
+taxonomy.json

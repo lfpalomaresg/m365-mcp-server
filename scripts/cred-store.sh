@@ -7,8 +7,8 @@
 #   ./scripts/cred-store.sh delete             # borra
 
 set -euo pipefail
-SERVICE="env-sync-bw-session"
-ACCOUNT="env-sync"
+SERVICE="com.luisfran.m365-mcp-server"   # nombre de la entrada ya creada en el Keychain del Mac (15/09)
+ACCOUNT="bw-session-env-sync"
 
 case "${1:-}" in
   set)
