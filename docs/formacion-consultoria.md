@@ -79,7 +79,7 @@ Cliente                    Azure AD                  Graph API
   │                           │────────────────────────►│
 ```
 
-El `setup.py` automatiza los pasos 1-5. El MCP server maneja el paso 6 y la renovación automática.
+`npm run auth` hace el flujo completo y guarda el token (paso 6); el MCP server lo renueva solo. `scripts/setup.py` solo **verifica** el CLIENT_ID con los pasos 1-5 y genera el `.env`: el token que obtiene no se guarda.
 
 ---
 
@@ -143,8 +143,8 @@ if text.startswith("/mi_comando"):
 ## 5. Despliegue en un cliente nuevo
 
 ### Requisitos previos
-- Azure App Registration con redirect URI `http://localhost`
-- Permisos de API: `User.Read`, `Mail.ReadWrite`, `Mail.Send`, `Files.ReadWrite`, `Calendars.ReadWrite`, `Tasks.ReadWrite`
+- Azure App Registration con redirect URI **`http://localhost:3000`** (el que usa `src/auth.ts`). ⚠️ `scripts/setup.py` verifica hoy contra `http://localhost`: hasta que se alinee, registra ambos o la verificación fallará.
+- Permisos de API delegados: los **16** de `GRAPH_SCOPES` en `src/auth.ts` (ver §7).
 - Node.js 22+, Python 3.10+
 
 ### Paso a paso (2 minutos con setup.py)
@@ -153,7 +153,9 @@ if text.startswith("/mi_comando"):
 git clone https://github.com/lfpalomaresg/m365-mcp-server.git
 cd m365-mcp-server
 npm install
-python scripts/setup.py     # Pide CLIENT_ID, verifica, crea .env
+python scripts/setup.py     # Pide CLIENT_ID, lo verifica y crea .env (⚠️ SOBRESCRIBE un .env existente)
+npm run build
+npm run auth                 # Login real y guardado del token
 npm start                    # Arranca el MCP server
 ```
 
@@ -226,17 +228,19 @@ npm run build      # Recompilar TypeScript
 ## 7. FAQ de cliente
 
 **¿Mis datos salen de mi ordenador?**
-No. El MCP server corre 100% local. Los tokens de Microsoft se almacenan solo en tu disco. Ni el desarrollador ni terceros tienen acceso a tus correos, archivos o calendario.
+El MCP server corre en local y los tokens de Microsoft se guardan solo en tu disco: el desarrollador no tiene acceso a tu cuenta. Pero **sí salen datos**, y conviene decirlo claro:
+- Lo que devuelven las herramientas (correos, ficheros, eventos que el asistente consulta) se envía al **proveedor del modelo de IA** que use el host (p. ej. Anthropic con Claude Code, o el que tengas configurado en Opencode).
+- El **bot de Telegram** manda sus respuestas y avisos a través de los servidores de Telegram.
+- Toda la información sigue viviendo en **Microsoft 365**, que es quien la sirve vía Graph.
 
 **¿Qué permisos necesita y por qué?**
-- `User.Read`: identificar tu cuenta
-- `Mail.ReadWrite`: leer y mover correos (clasificación)
-- `Mail.Send`: enviar respuestas desde el bot
-- `Files.ReadWrite`: acceder a OneDrive
-- `Calendars.ReadWrite`: consultar y crear eventos
-- `Tasks.ReadWrite`: gestionar To-Do
+`npm run auth` pide hoy **16 permisos delegados** (`GRAPH_SCOPES` en `src/auth.ts`):
+- Correo: `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `MailboxSettings.ReadWrite`
+- Archivos: `Files.ReadWrite.All`, `Sites.ReadWrite.All` (OneDrive y **SharePoint**)
+- Calendario y tareas: `Calendars.ReadWrite`, `Tasks.ReadWrite`
+- Otros: `User.Read`, `Contacts.ReadWrite`, `Notes.ReadWrite`, `OnlineMeetings.ReadWrite`, `People.Read`, `Presence.Read`, `Chat.ReadWrite` (**chats de Teams**), `offline_access`
 
-Son los mínimos necesarios para las 13 herramientas. Se pueden reducir si no usas algunas.
+**No son los mínimos**: las 13 herramientas del servidor usan un subconjunto (`src/index.ts` pide 8). Antes de desplegar en un cliente, recorta `GRAPH_SCOPES` a lo que de verdad vaya a usar — sobre todo `Sites.ReadWrite.All` y `Chat.ReadWrite`, que dan acceso amplio.
 
 **¿Puedo limitar las carpetas que clasifica?**
 Sí. `taxonomy.json` solo define las reglas que tú pongas. Si no pones reglas para una carpeta, el bot no la toca.
