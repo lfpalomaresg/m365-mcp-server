@@ -79,7 +79,7 @@ Cliente                    Azure AD                  Graph API
   │                           │────────────────────────►│
 ```
 
-`npm run auth` hace el flujo completo y guarda el token (paso 6); el MCP server lo renueva solo. `scripts/setup.py` solo **verifica** el CLIENT_ID con los pasos 1-5 y genera el `.env`: el token que obtiene no se guarda.
+`npm run auth` hace el flujo completo y guarda el token (paso 6); el MCP server lo renueva solo. `scripts/setup.py` solo **verifica** el CLIENT_ID con los pasos 1-5 (mismo redirect y mismos permisos que `src/auth.ts`) y genera el `.env`: el token que obtiene no se guarda.
 
 ---
 
@@ -143,7 +143,7 @@ if text.startswith("/mi_comando"):
 ## 5. Despliegue en un cliente nuevo
 
 ### Requisitos previos
-- Azure App Registration con redirect URI **`http://localhost:3000`** (el que usa `src/auth.ts`). ⚠️ `scripts/setup.py` verifica hoy contra `http://localhost`: hasta que se alinee, registra ambos o la verificación fallará.
+- Azure App Registration con redirect URI **`http://localhost:3000`** (el que usan `src/auth.ts` y `scripts/setup.py`).
 - Permisos de API delegados: los **16** de `GRAPH_SCOPES` en `src/auth.ts` (ver §7).
 - Node.js 22+, Python 3.10+
 
@@ -153,7 +153,7 @@ if text.startswith("/mi_comando"):
 git clone https://github.com/lfpalomaresg/m365-mcp-server.git
 cd m365-mcp-server
 npm install
-python scripts/setup.py     # Pide CLIENT_ID, lo verifica y crea .env (⚠️ SOBRESCRIBE un .env existente)
+python scripts/setup.py     # Pide CLIENT_ID y tenant, lo verifica y crea .env (si ya existe, pregunta y guarda copia .env.bak)
 npm run build
 npm run auth                 # Login real y guardado del token
 npm start                    # Arranca el MCP server
