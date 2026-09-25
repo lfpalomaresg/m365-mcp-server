@@ -8,6 +8,6 @@ build/
 .DS_Store
 .claude/
 __pycache__/
-.env.bak.*
+.env.bak*
 # Reglas de clasificación del bot: config local con nombres de personas (RGPD), no va a git
 taxonomy.json
