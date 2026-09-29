@@ -11,3 +11,16 @@ __pycache__/
 .env.bak*
 # Reglas de clasificación del bot: config local con nombres de personas (RGPD), no va a git
 taxonomy.json
+
+# ===== BLOQUE COMUN repos-sync — reglas que faltaban =====
+data/datos_brutos/
+clientes/
+*.pbix
+*_REAL.xlsx
+*_REAL.csv
+~$*
+graphify-out/
+.claude/worktrees/
+.conclave/
+.playwright/
+# ===== FIN BLOQUE COMUN repos-sync =====
