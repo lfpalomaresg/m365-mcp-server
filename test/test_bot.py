@@ -362,3 +362,37 @@ class TestSafeAttachmentPath(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             open(os.path.join(d, "f.pdf"), "w").close()
             self.assertEqual(os.path.basename(bot.safe_attachment_path(d, "f.pdf")), "f (1).pdf")
+
+
+class TestMarkdownEscape(unittest.TestCase):
+    """Un «_» o «*» sin cerrar en remitente/asunto hace que Telegram rechace el
+    mensaje entero (400 can't parse entities) y el usuario no recibe nada."""
+
+    def test_md_escape(self):
+        self.assertEqual(bot.md_escape("a_b*c`d[e"), "a\\_b\\*c\\`d\\[e")
+        self.assertEqual(bot.md_escape(None), "")
+
+    def test_email_list_escapes_sender_and_subject(self):
+        out = bot.format_email_list([{
+            "id": "1", "subject": "factura_2026 *urgente",
+            "from": {"emailAddress": {"name": "j_perez"}},
+            "receivedDateTime": "2026-10-03T09:15:00Z",
+        }])
+        self.assertIn("*j\\_perez*", out)
+        self.assertIn("_factura\\_2026 \\*urgente_", out)
+
+    def test_ver_escapes_body(self):
+        bot.last_results["77"] = {"1": "MID"}
+        fake = {"subject": "a_b", "from": "x*y", "received": "2026-10-03T09:15",
+                "preview": "", "body": "ver [enlace] y_z", "hasAttachments": False}
+        with mock.patch.object(bot, "get_message_body", return_value=fake):
+            out = bot.handle_ver(77, "1")
+        self.assertIn("a\\_b", out)
+        self.assertIn("x\\*y", out)
+        self.assertIn("\\[enlace] y\\_z", out)
+
+    def test_push_alert_escapes(self):
+        out = bot.format_alert({"subject": "pedido_123",
+                                "from": {"emailAddress": {"name": "*Boss*_"}}})
+        self.assertIn("De: *\\*Boss\\*\\_*", out)
+        self.assertIn("Asunto: _pedido\\_123_", out)

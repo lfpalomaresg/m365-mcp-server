@@ -343,14 +343,19 @@ def strip_html(text):
     text = re.sub(r"<[^>]+>", "", text)
     return html_mod.unescape(text).strip()
 
+def md_escape(text):
+    """Escapa los caracteres de Markdown (legacy) de Telegram en datos externos
+    (remitente, asunto, cuerpo): uno sin cerrar tumba el mensaje entero."""
+    return re.sub(r"([_*`\[])", r"\\\1", str(text or ""))
+
 def format_email_list(emails, show_ids=True):
     if not emails:
         return "Sin resultados."
     msg = ""
     for i, m in enumerate(emails, 1):
         sender = (m.get("from", {}) or {}).get("emailAddress", {}) or {}
-        name = sender.get("name", "?")
-        subj = (m.get("subject") or "Sin asunto")[:70]
+        name = md_escape(sender.get("name", "?"))
+        subj = md_escape((m.get("subject") or "Sin asunto")[:70])
         t = (m.get("receivedDateTime", "") or "")[11:16]
         prefix = f"{i}." if show_ids else "•"
         att = "📎" if m.get("hasAttachments") else ""
@@ -632,7 +637,7 @@ def classify_unread(chat_id=None, apply_now=False):
 
     msg = f"📋 *Propuesta ({len(proposed)} de {len(emails)} sin leer):*\n\n"
     for i, p in enumerate(proposed, 1):
-        msg += f"{i}. *{p['sender']}*:\n   _{p['subject'][:60]}_\n   👉 `{p['target']}`\n\n"
+        msg += f"{i}. *{md_escape(p['sender'])}*:\n   _{md_escape(p['subject'][:60])}_\n   👉 `{p['target']}`\n\n"
     msg += "Pulsa *Aplicar* para moverlos, o *Cancelar* para ignorar."
     return msg
 
@@ -892,6 +897,12 @@ def check_important_unread():
         _notified_ids = set(list(_notified_ids)[-200:])
     return alerts
 
+def format_alert(alert):
+    sender_name = ((alert.get("from") or {}).get("emailAddress") or {}).get("name", "?")
+    return (f"🔔 *Correo importante sin leer*\n\n"
+            f"De: *{md_escape(sender_name)}*\n"
+            f"Asunto: _{md_escape(alert.get('subject', '?'))}_")
+
 # ─── Message / Callback handlers ───────────────────────────────────────────────
 
 def handle_hoy(chat_id):
@@ -915,7 +926,7 @@ def handle_buscar(chat_id, query):
     if results is None:
         return "❌ Error al buscar."
     if not results:
-        return f"No encontre resultados para \"{query}\"."
+        return f"No encontre resultados para \"{md_escape(query)}\"."
     register_results(chat_id, results)
     return f"🔍 *Resultados ({len(results)}):*\n\n" + format_email_list(results)
 
@@ -928,10 +939,10 @@ def handle_ver(chat_id, short_id):
     if not body:
         return "❌ No pude leer ese correo."
     text = (
-        f"📧 *{body['subject']}*\n"
-        f"De: {body['from']}\n"
+        f"📧 *{md_escape(body['subject'])}*\n"
+        f"De: {md_escape(body['from'])}\n"
         f"Recibido: {body['received'][:16].replace('T', ' ')}\n\n"
-        f"{body['body'][:1500]}"
+        f"{md_escape(body['body'][:1500])}"
     )
     return text
 
@@ -944,8 +955,8 @@ def handle_calendar(chat_id):
     msg = f"📅 *Eventos de hoy ({len(events)}):*\n\n"
     for e in events:
         start = (e.get("start") or {}).get("dateTime", "") or ""
-        subj = e.get("subject", "Sin título")
-        loc = (e.get("location") or {}).get("displayName", "")
+        subj = md_escape(e.get("subject", "Sin título"))
+        loc = md_escape((e.get("location") or {}).get("displayName", ""))
         t = start[11:16] if start else "?"
         loc_txt = f" — {loc}" if loc else ""
         msg += f"• [{t}] {subj}{loc_txt}\n"
@@ -961,7 +972,7 @@ def handle_tareas(chat_id):
     for t in tasks:
         due = f" — {t['due'][:10]}" if t.get("due") else ""
         star = "⭐" if t.get("importance") == "high" else ""
-        msg += f"{star}• {t['title']} ({t['list']}){due}\n"
+        msg += f"{star}• {md_escape(t['title'])} ({md_escape(t['list'])}){due}\n"
     return msg
 
 # ─── Natural Language (LLM local) ──────────────────────────────────────────────
@@ -1036,18 +1047,9 @@ def main():
 
             # Push notifications
             for alert in check_important_unread():
-                sender_name = (
-                    ((alert.get("from") or {}).get("emailAddress") or {}).get("name", "?")
-                )
-                alert_subj = alert.get("subject", "?")
                 short = register_alert(ALLOWED_USER_ID, alert.get("id", ""))
-                send_telegram(
-                    ALLOWED_USER_ID,
-                    f"🔔 *Correo importante sin leer*\n\n"
-                    f"De: *{sender_name}*\n"
-                    f"Asunto: _{alert_subj}_",
-                    reply_markup=email_actions_keyboard(short)
-                )
+                send_telegram(ALLOWED_USER_ID, format_alert(alert),
+                              reply_markup=email_actions_keyboard(short))
 
             # Auto-classify
             if AUTO_CLASSIFY_SECONDS > 0 and now - _last_auto_classify > AUTO_CLASSIFY_SECONDS:
@@ -1245,9 +1247,9 @@ def handle_message(chat_id, text):
                 save_state()
                 summary = (
                     f"✉️ *Confirmar envio:*\n\n"
-                    f"*Para:* {st['to']}\n"
-                    f"*Asunto:* {st['subject']}\n"
-                    f"*Cuerpo:* {st['body'][:200]}"
+                    f"*Para:* {md_escape(st['to'])}\n"
+                    f"*Asunto:* {md_escape(st['subject'])}\n"
+                    f"*Cuerpo:* {md_escape(st['body'][:200])}"
                 )
                 send_telegram(chat_id, summary, reply_markup=confirm_keyboard("confirm_send"))
                 return
