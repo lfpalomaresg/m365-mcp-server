@@ -16,7 +16,7 @@ import {
   listOneDriveFolder,
   moveOneDriveItem,
 } from "./onedrive.js";
-import { a1Range, buildEmailFilter, clampTop, idSegment, odataString, safeLocalPath } from "./safety.js";
+import { a1Range, buildEmailFilter, clampTop, drivePath, idSegment, odataString, safeLocalPath } from "./safety.js";
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
@@ -137,7 +137,7 @@ async function downloadOneDriveFile(args: { file_id: string; file_name?: string 
 
 async function uploadOneDriveFile(args: { file_name: string; content: string; folder_path?: string }) {
   const client = graphClient(await getAccessToken());
-  const remotePath = args.folder_path ? `${args.folder_path}/${args.file_name}` : args.file_name;
+  const remotePath = drivePath(args.folder_path, args.file_name);
   const res = await client
     .api(`/me/drive/root:/${remotePath}:/content`)
     .put(Buffer.from(args.content, "utf-8"));

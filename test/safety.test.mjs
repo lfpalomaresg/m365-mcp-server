@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { a1Range, buildEmailFilter, clampTop, idSegment, odataString, safeLocalPath } from "../dist/safety.js";
+import { a1Range, buildEmailFilter, clampTop, drivePath, idSegment, odataString, safeLocalPath } from "../dist/safety.js";
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "m365-safety-"));
@@ -76,4 +76,17 @@ test("clampTop bounds page sizes and falls back on junk", () => {
   assert.equal(clampTop(7.9, 10, 100), 7);
   assert.equal(clampTop("abc", 10, 100), 10);
   assert.equal(clampTop(Number.NaN, 10, 100), 10);
+});
+
+test("drivePath encodes each segment of an upload path", () => {
+  assert.equal(drivePath("Documents/Informes 2026", "Q3 #1.md"), "Documents/Informes%202026/Q3%20%231.md");
+  assert.equal(drivePath("/Docs//", "a.txt"), "Docs/a.txt");
+  assert.equal(drivePath(undefined, "a.txt"), "a.txt");
+});
+
+test("drivePath rejects traversal, separators in the name and empty names", () => {
+  assert.throws(() => drivePath("Docs/../..", "a.txt"), /Invalid OneDrive path/);
+  assert.throws(() => drivePath("Docs", "../a.txt"), /Invalid OneDrive file name/);
+  assert.throws(() => drivePath("Docs", "  "), /Invalid OneDrive file name/);
+  assert.throws(() => drivePath("Docs", "a:b.txt"), /Invalid OneDrive file name/);
 });

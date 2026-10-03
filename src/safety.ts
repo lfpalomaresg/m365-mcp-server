@@ -65,3 +65,15 @@ export function clampTop(value: unknown, fallback: number, max: number): number 
   if (!Number.isFinite(n)) return fallback;
   return Math.max(1, Math.min(Math.trunc(n), max));
 }
+
+// Path for /me/drive/root:/<path>:/content. Every segment is percent-encoded
+// ("#", "?" and spaces would otherwise cut the URL) and "." / ".." are refused.
+export function drivePath(folderPath: string | undefined, fileName: string): string {
+  const name = String(fileName ?? "").trim();
+  if (!name || name === "." || name === ".." || /[\\/:*?"<>|]/.test(name)) {
+    throw new Error("Invalid OneDrive file name");
+  }
+  const segments = String(folderPath ?? "").split("/").map((s) => s.trim()).filter(Boolean);
+  if (segments.some((s) => s === "." || s === "..")) throw new Error("Invalid OneDrive path");
+  return [...segments, name].map(encodeURIComponent).join("/");
+}
