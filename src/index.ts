@@ -15,7 +15,7 @@ import {
   listOneDriveFolder,
   moveOneDriveItem,
 } from "./onedrive.js";
-import { buildEmailFilter, idSegment, odataString, safeLocalPath } from "./safety.js";
+import { a1Range, buildEmailFilter, idSegment, odataString, safeLocalPath } from "./safety.js";
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
@@ -188,13 +188,13 @@ async function updateExcelSheet(args: {
   const base = `/me/drive/items/${idSegment(args.file_id, "file_id")}/workbook/worksheets/${encodeURIComponent(args.sheet_name)}`;
 
   if (args.action === "read") {
-    const endpoint = args.range ? `${base}/range(address='${args.range}')` : `${base}/usedRange`;
+    const endpoint = args.range ? `${base}/range(address='${a1Range(args.range)}')` : `${base}/usedRange`;
     const res = await client.api(endpoint).get();
     return { values: res.values, address: res.address, rowCount: res.rowCount, columnCount: res.columnCount };
   }
 
   if (!args.range || !args.values) throw new Error("'range' and 'values' are required for write action");
-  const res = await client.api(`${base}/range(address='${args.range}')`).patch({ values: args.values });
+  const res = await client.api(`${base}/range(address='${a1Range(args.range)}')`).patch({ values: args.values });
   return { address: res.address, updated: true };
 }
 

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { buildEmailFilter, idSegment, odataString, safeLocalPath } from "../dist/safety.js";
+import { a1Range, buildEmailFilter, idSegment, odataString, safeLocalPath } from "../dist/safety.js";
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "m365-safety-"));
@@ -54,4 +54,16 @@ test("idSegment percent-encodes ids so they cannot add path segments or queries"
 test("idSegment rejects empty ids with the parameter name", () => {
   assert.throws(() => idSegment("  ", "list_id"), /list_id cannot be empty/);
   assert.throws(() => idSegment(undefined, "task_id"), /task_id cannot be empty/);
+});
+
+test("a1Range accepts A1 references and ranges", () => {
+  for (const ok of ["A1", "a1:d10", "$A$1:$B$2", "A:C", "3:7", "XFD1048576"]) {
+    assert.equal(a1Range(ok), ok);
+  }
+});
+
+test("a1Range rejects anything that could break out of range(address='...')", () => {
+  for (const bad of ["A1')/x", "A1:B2'", "", "Sheet1!A1", "A1;B2", "ABCD1"]) {
+    assert.throws(() => a1Range(bad), /Invalid range/, bad);
+  }
 });

@@ -39,3 +39,22 @@ export function idSegment(id: string | undefined, param: string): string {
   if (!id || !String(id).trim()) throw new Error(`${param} cannot be empty`);
   return encodeURIComponent(String(id));
 }
+
+// Excel range in A1 notation (cell, cell range, whole columns or rows). It is
+// interpolated into range(address='...'), so nothing else is allowed through.
+const CELL = /^\$?[A-Za-z]{1,3}\$?\d+$/;
+const COL = /^\$?[A-Za-z]{1,3}$/;
+const ROW = /^\$?\d+$/;
+
+export function a1Range(range: string): string {
+  const parts = String(range ?? "").split(":");
+  const valid =
+    (parts.length === 1 && CELL.test(parts[0]))
+    || (parts.length === 2 && (
+      (CELL.test(parts[0]) && CELL.test(parts[1]))
+      || (COL.test(parts[0]) && COL.test(parts[1]))
+      || (ROW.test(parts[0]) && ROW.test(parts[1]))
+    ));
+  if (!valid) throw new Error(`Invalid range: use A1 notation such as 'A1:D10'`);
+  return range;
+}
