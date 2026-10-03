@@ -2,7 +2,8 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { PublicClientApplication, type ICachePlugin, type TokenCacheContext } from "@azure/msal-node";
+import { PublicClientApplication } from "@azure/msal-node";
+import { fileCachePlugin } from "./token-cache.js";
 import { Client, ResponseType } from "@microsoft/microsoft-graph-client";
 import "isomorphic-fetch";
 import * as dotenv from "dotenv";
@@ -52,18 +53,7 @@ const GRAPH_SCOPES = [
 
 // ─── Token Cache ──────────────────────────────────────────────────────────────
 
-const cachePlugin: ICachePlugin = {
-  async beforeCacheAccess(ctx: TokenCacheContext) {
-    if (fs.existsSync(TOKEN_CACHE_PATH)) {
-      ctx.tokenCache.deserialize(fs.readFileSync(TOKEN_CACHE_PATH, "utf-8"));
-    }
-  },
-  async afterCacheAccess(ctx: TokenCacheContext) {
-    if (ctx.cacheHasChanged) {
-      fs.writeFileSync(TOKEN_CACHE_PATH, ctx.tokenCache.serialize());
-    }
-  },
-};
+const cachePlugin = fileCachePlugin(TOKEN_CACHE_PATH);
 
 async function getAccessToken(): Promise<string> {
   const msalApp = new PublicClientApplication({

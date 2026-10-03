@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { PublicClientApplication, type ICachePlugin, type TokenCacheContext } from "@azure/msal-node";
+import { PublicClientApplication } from "@azure/msal-node";
+import { fileCachePlugin } from "./token-cache.js";
 import * as dotenv from "dotenv";
-import * as fs from "fs";
 import * as path from "path";
 import * as http from "http";
 import * as crypto from "crypto";
@@ -39,18 +39,7 @@ const GRAPH_SCOPES = [
   "offline_access",
 ];
 
-const cachePlugin: ICachePlugin = {
-  async beforeCacheAccess(ctx: TokenCacheContext) {
-    if (fs.existsSync(TOKEN_CACHE_PATH)) {
-      ctx.tokenCache.deserialize(fs.readFileSync(TOKEN_CACHE_PATH, "utf-8"));
-    }
-  },
-  async afterCacheAccess(ctx: TokenCacheContext) {
-    if (ctx.cacheHasChanged) {
-      fs.writeFileSync(TOKEN_CACHE_PATH, ctx.tokenCache.serialize());
-    }
-  },
-};
+const cachePlugin = fileCachePlugin(TOKEN_CACHE_PATH);
 
 function base64URLEncode(buffer: Buffer): string {
   return buffer.toString("base64")

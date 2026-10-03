@@ -1,6 +1,6 @@
-import { PublicClientApplication, type ICachePlugin, type TokenCacheContext } from "@azure/msal-node";
+import { PublicClientApplication } from "@azure/msal-node";
+import { fileCachePlugin } from "./token-cache.js";
 import * as dotenv from "dotenv";
-import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
@@ -27,18 +27,7 @@ const GRAPH_SCOPES = [
   "offline_access"
 ];
 
-const cachePlugin: ICachePlugin = {
-  async beforeCacheAccess(ctx: TokenCacheContext) {
-    if (fs.existsSync(TOKEN_CACHE_PATH)) {
-      ctx.tokenCache.deserialize(fs.readFileSync(TOKEN_CACHE_PATH, "utf-8"));
-    }
-  },
-  async afterCacheAccess(ctx: TokenCacheContext) {
-    if (ctx.cacheHasChanged) {
-      fs.writeFileSync(TOKEN_CACHE_PATH, ctx.tokenCache.serialize());
-    }
-  },
-};
+const cachePlugin = fileCachePlugin(TOKEN_CACHE_PATH);
 
 async function printToken() {
   const msalApp = new PublicClientApplication({
