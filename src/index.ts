@@ -15,6 +15,7 @@ import {
   listOneDriveFolder,
   moveOneDriveItem,
 } from "./onedrive.js";
+import { safeLocalPath } from "./safety.js";
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
@@ -137,7 +138,7 @@ async function downloadOneDriveFile(args: { file_id: string; file_name?: string 
   }
 
   if (!fs.existsSync(DOWNLOAD_PATH)) fs.mkdirSync(DOWNLOAD_PATH, { recursive: true });
-  const dest = path.join(DOWNLOAD_PATH, name);
+  const dest = safeLocalPath(DOWNLOAD_PATH, name);
   fs.writeFileSync(dest, buf);
   return { name, type: "binary", savedTo: dest, size: buf.length };
 }
@@ -262,7 +263,7 @@ async function downloadEmailAttachments(args: { message_id: string; save_path?: 
   const saved: string[] = [];
   for (const att of res.value as any[]) {
     if (att["@odata.type"] === "#microsoft.graph.fileAttachment") {
-      const dest = path.join(savePath, att.name);
+      const dest = safeLocalPath(savePath, att.name);
       fs.writeFileSync(dest, Buffer.from(att.contentBytes, "base64"));
       saved.push(dest);
     }
