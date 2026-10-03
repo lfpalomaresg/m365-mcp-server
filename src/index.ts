@@ -15,7 +15,7 @@ import {
   listOneDriveFolder,
   moveOneDriveItem,
 } from "./onedrive.js";
-import { safeLocalPath } from "./safety.js";
+import { buildEmailFilter, odataString, safeLocalPath } from "./safety.js";
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
@@ -207,10 +207,7 @@ async function getLatestEmails(args: {
   unread_only?: boolean;
 }) {
   const client = graphClient(await getAccessToken());
-  const filters: string[] = [];
-  if (args.sender) filters.push(`from/emailAddress/address eq '${args.sender}'`);
-  if (args.subject) filters.push(`contains(subject,'${args.subject}')`);
-  if (args.unread_only) filters.push("isRead eq false");
+  const filter = buildEmailFilter(args);
 
   let req = client
     .api("/me/messages")
@@ -218,7 +215,7 @@ async function getLatestEmails(args: {
     .orderby("receivedDateTime desc")
     .select("id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments");
 
-  if (filters.length > 0) req = req.filter(filters.join(" and "));
+  if (filter) req = req.filter(filter);
   const res = await req.get();
   return (res.value as any[]).map((m) => ({
     id: m.id,
@@ -337,8 +334,8 @@ async function syncCalendarEvents(args: {
 
   if (args.action === "list") {
     const filters: string[] = [];
-    if (args.start_date) filters.push(`start/dateTime ge '${args.start_date}'`);
-    if (args.end_date) filters.push(`end/dateTime le '${args.end_date}'`);
+    if (args.start_date) filters.push(`start/dateTime ge ${odataString(args.start_date)}`);
+    if (args.end_date) filters.push(`end/dateTime le ${odataString(args.end_date)}`);
     let req = client
       .api("/me/events")
       .top(args.top ?? 20)

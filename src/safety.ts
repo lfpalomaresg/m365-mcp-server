@@ -18,3 +18,17 @@ export function safeLocalPath(dir: string, untrustedName: string): string {
   }
   return candidate;
 }
+
+// OData string literal: a single quote inside the value is escaped by doubling it.
+// Without this, sender "x') or (isRead eq true" rewrites the $filter.
+export function odataString(value: string): string {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+export function buildEmailFilter(args: { sender?: string; subject?: string; unread_only?: boolean }): string {
+  const filters: string[] = [];
+  if (args.sender) filters.push(`from/emailAddress/address eq ${odataString(args.sender)}`);
+  if (args.subject) filters.push(`contains(subject,${odataString(args.subject)})`);
+  if (args.unread_only) filters.push("isRead eq false");
+  return filters.join(" and ");
+}
