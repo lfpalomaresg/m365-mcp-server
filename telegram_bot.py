@@ -28,7 +28,11 @@ ATTACH_DIR = os.path.join(DIST_DIR, "attachments")
 def _redact(text):
     """Nunca escribir el token del bot: va dentro de la URL de la API de Telegram
     (2026-09-16: salía en claro en dist/bot.log en cada error de red)."""
-    return re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot<token>", str(text))
+    text = re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot<token>", str(text))
+    # Tokens de Microsoft (cabecera, JWT suelto o parámetro de URL) tampoco.
+    text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <token>", text)
+    text = re.sub(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*", "<jwt>", text)
+    return re.sub(r"(?i)\b((?:access|refresh|id)_token=)[^&\s]+", r"\1<token>", text)
 
 def log(msg):
     line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {_redact(msg)}"

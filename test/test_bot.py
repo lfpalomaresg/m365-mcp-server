@@ -396,3 +396,26 @@ class TestMarkdownEscape(unittest.TestCase):
                                 "from": {"emailAddress": {"name": "*Boss*_"}}})
         self.assertIn("De: *\\*Boss\\*\\_*", out)
         self.assertIn("Asunto: _pedido\\_123_", out)
+
+
+class TestRedactGraphTokens(unittest.TestCase):
+    """Además del token del bot, ningún access token de Microsoft llega al log."""
+
+    JWT = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJodHRwczovL2dyYXBoIn0.c2lnbmF0dXJhLWZhbHNh"
+
+    def test_bearer_header_redacted(self):
+        out = bot._redact("Authorization: Bearer EwB4A8l6BAAUAOyDv0l6PcCVu89kmzvqZmkWABk")
+        self.assertNotIn("EwB4A8l6", out)
+        self.assertIn("Bearer <token>", out)
+
+    def test_bare_jwt_redacted(self):
+        out = bot._redact(f"respuesta rara: {self.JWT} fin")
+        self.assertNotIn("eyJhdWQi", out)
+        self.assertIn("<jwt>", out)
+
+    def test_access_token_query_param_redacted(self):
+        out = bot._redact("https://x/cb?access_token=abc123secret&state=1")
+        self.assertNotIn("abc123secret", out)
+
+    def test_plain_text_untouched(self):
+        self.assertEqual(bot._redact("HTTP 404 on /me/messages"), "HTTP 404 on /me/messages")
