@@ -58,3 +58,10 @@ export function a1Range(range: string): string {
   if (!valid) throw new Error(`Invalid range: use A1 notation such as 'A1:D10'`);
   return range;
 }
+
+// Page size from the model: integer within [1, max]; junk falls back to the default.
+export function clampTop(value: unknown, fallback: number, max: number): number {
+  const n = typeof value === "number" ? value : Number.NaN;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.min(Math.trunc(n), max));
+}

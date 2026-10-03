@@ -15,7 +15,7 @@ import {
   listOneDriveFolder,
   moveOneDriveItem,
 } from "./onedrive.js";
-import { a1Range, buildEmailFilter, idSegment, odataString, safeLocalPath } from "./safety.js";
+import { a1Range, buildEmailFilter, clampTop, idSegment, odataString, safeLocalPath } from "./safety.js";
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
@@ -104,7 +104,7 @@ async function searchOneDriveFiles(args: { query: string; top?: number }) {
   const res = await client
     .api(`/me/drive/root/search(q='${encodeURIComponent(args.query)}')`)
     .select("id,name,webUrl,size,lastModifiedDateTime,file")
-    .top(args.top ?? 20)
+    .top(clampTop(args.top, 20, 200))
     .get();
   return (res.value as any[]).map((f) => ({
     id: f.id,
@@ -211,7 +211,7 @@ async function getLatestEmails(args: {
 
   let req = client
     .api("/me/messages")
-    .top(args.top ?? 10)
+    .top(clampTop(args.top, 10, 100))
     .orderby("receivedDateTime desc")
     .select("id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments");
 
@@ -338,7 +338,7 @@ async function syncCalendarEvents(args: {
     if (args.end_date) filters.push(`end/dateTime le ${odataString(args.end_date)}`);
     let req = client
       .api("/me/events")
-      .top(args.top ?? 20)
+      .top(clampTop(args.top, 20, 100))
       .orderby("start/dateTime")
       .select("id,subject,start,end,location,organizer,bodyPreview");
     if (filters.length > 0) req = req.filter(filters.join(" and "));
@@ -381,7 +381,7 @@ const TOOLS = [
       type: "object",
       properties: {
         query: { type: "string", description: "Search term: filename, extension (.xlsx), or keyword" },
-        top: { type: "number", description: "Max results (default 20)" },
+        top: { type: "number", description: "Max results (default 20, max 200)" },
       },
       required: ["query"],
     },
@@ -484,7 +484,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        top: { type: "number", description: "Number of emails (default 10)" },
+        top: { type: "number", description: "Number of emails (default 10, max 100)" },
         sender: { type: "string", description: "Filter by sender address" },
         subject: { type: "string", description: "Filter by subject keyword" },
         unread_only: { type: "boolean", description: "Only return unread emails" },
@@ -545,7 +545,7 @@ const TOOLS = [
       type: "object",
       properties: {
         action: { type: "string", enum: ["list", "create"] },
-        top: { type: "number", description: "Max events to list (default 20)" },
+        top: { type: "number", description: "Max events to list (default 20, max 100)" },
         start_date: { type: "string", description: "Filter from date ISO8601" },
         end_date: { type: "string", description: "Filter until date ISO8601" },
         subject: { type: "string", description: "Event title (required for create)" },

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { a1Range, buildEmailFilter, idSegment, odataString, safeLocalPath } from "../dist/safety.js";
+import { a1Range, buildEmailFilter, clampTop, idSegment, odataString, safeLocalPath } from "../dist/safety.js";
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "m365-safety-"));
@@ -66,4 +66,14 @@ test("a1Range rejects anything that could break out of range(address='...')", ()
   for (const bad of ["A1')/x", "A1:B2'", "", "Sheet1!A1", "A1;B2", "ABCD1"]) {
     assert.throws(() => a1Range(bad), /Invalid range/, bad);
   }
+});
+
+test("clampTop bounds page sizes and falls back on junk", () => {
+  assert.equal(clampTop(undefined, 10, 100), 10);
+  assert.equal(clampTop(5000, 10, 100), 100);
+  assert.equal(clampTop(0, 10, 100), 1);
+  assert.equal(clampTop(-3, 10, 100), 1);
+  assert.equal(clampTop(7.9, 10, 100), 7);
+  assert.equal(clampTop("abc", 10, 100), 10);
+  assert.equal(clampTop(Number.NaN, 10, 100), 10);
 });
