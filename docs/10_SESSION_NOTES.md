@@ -62,3 +62,19 @@
 - Los movimientos exigen ID, nombre y carpeta de origen esperados; cualquier cambio desde el inventario aborta la operación.
 - La creación y el movimiento fallan ante conflictos; no renombran ni sustituyen silenciosamente.
 - El listado pagina internamente hasta 1.000 elementos por llamada y permite continuar mediante una URL validada de Microsoft Graph.
+
+## 2026-10-04 — Claude (Mac) — Round de 10 loops de automejora (TDD)
+
+### Hecho
+- Nuevo `src/safety.ts` (helpers puros testeados) y `src/token-cache.ts` (plugin MSAL único).
+- L1 nombres de adjuntos/descargas sin path traversal ni sobrescritura · L2 literales OData escapados (correo/calendario) · L3 ids codificados en rutas Graph · L4 rango Excel validado (A1) · L5 `top` acotado · L6 caché MSAL 0600/0700 y plugin deduplicado (index/token/auth) · L7 ruta de subida OneDrive codificada y sin `..`.
+- Bot: L8 `/adjuntos` sin path traversal · L9 escape Markdown en listas, `/ver`, avisos push, clasificación y confirmación de envío · L10 `_redact` cubre Bearer/JWT/`*_token=`.
+- Tests: 13→28 Node, 57→68 Python, todo en verde.
+
+### Pendiente
+- Reiniciar el servidor MCP en Claude Code para cargar el `dist/` nuevo.
+- `token.ts` y el bot ignoran `TOKEN_CACHE_PATH` (usan `~/.m365-mcp/` fijo); hoy coincide con `.env`, pero conviene unificar.
+- `/ver` sigue cortando a 1500 chars; mensajes >4096 de Telegram no se trocean.
+
+### Decidido
+- Datos externos (nombres, asuntos, ids, rangos) se tratan como no confiables: se validan/escapan en helpers puros antes de tocar disco, URL u OData.
