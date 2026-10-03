@@ -15,7 +15,7 @@ import {
   listOneDriveFolder,
   moveOneDriveItem,
 } from "./onedrive.js";
-import { buildEmailFilter, odataString, safeLocalPath } from "./safety.js";
+import { buildEmailFilter, idSegment, odataString, safeLocalPath } from "./safety.js";
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
@@ -120,7 +120,7 @@ async function searchOneDriveFiles(args: { query: string; top?: number }) {
 
 async function downloadOneDriveFile(args: { file_id: string; file_name?: string }) {
   const client = graphClient(await getAccessToken());
-  const meta = await client.api(`/me/drive/items/${args.file_id}`).get();
+  const meta = await client.api(`/me/drive/items/${idSegment(args.file_id, "file_id")}`).get();
   const name: string = args.file_name ?? meta.name ?? "file";
   const ext = path.extname(name).toLowerCase();
   const textTypes = [".txt", ".md", ".json", ".csv", ".html", ".xml", ".ts", ".js", ".py", ".yaml", ".toml"];
@@ -128,7 +128,7 @@ async function downloadOneDriveFile(args: { file_id: string; file_name?: string 
   // /content bajo fetch/undici devuelve un web ReadableStream (sin .pipe); pedimos
   // ARRAYBUFFER para no mezclar web streams con Node streams.
   const raw = await client
-    .api(`/me/drive/items/${args.file_id}/content`)
+    .api(`/me/drive/items/${idSegment(args.file_id, "file_id")}/content`)
     .responseType(ResponseType.ARRAYBUFFER)
     .get();
   const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayBuffer);
@@ -185,7 +185,7 @@ async function updateExcelSheet(args: {
   values?: unknown[][];
 }) {
   const client = graphClient(await getAccessToken());
-  const base = `/me/drive/items/${args.file_id}/workbook/worksheets/${encodeURIComponent(args.sheet_name)}`;
+  const base = `/me/drive/items/${idSegment(args.file_id, "file_id")}/workbook/worksheets/${encodeURIComponent(args.sheet_name)}`;
 
   if (args.action === "read") {
     const endpoint = args.range ? `${base}/range(address='${args.range}')` : `${base}/usedRange`;
@@ -256,7 +256,7 @@ async function downloadEmailAttachments(args: { message_id: string; save_path?: 
   const savePath = args.save_path ?? DOWNLOAD_PATH;
   if (!fs.existsSync(savePath)) fs.mkdirSync(savePath, { recursive: true });
 
-  const res = await client.api(`/me/messages/${args.message_id}/attachments`).get();
+  const res = await client.api(`/me/messages/${idSegment(args.message_id, "message_id")}/attachments`).get();
   const saved: string[] = [];
   for (const att of res.value as any[]) {
     if (att["@odata.type"] === "#microsoft.graph.fileAttachment") {
@@ -287,7 +287,7 @@ async function manageTodoTasks(args: {
     }
     case "list_tasks": {
       if (!args.list_id) throw new Error("list_id required");
-      const res = await client.api(`/me/todo/lists/${args.list_id}/tasks`).get();
+      const res = await client.api(`/me/todo/lists/${idSegment(args.list_id, "list_id")}/tasks`).get();
       return (res.value as any[]).map((t) => ({
         id: t.id,
         title: t.title,
@@ -301,13 +301,13 @@ async function manageTodoTasks(args: {
       const body: Record<string, unknown> = { title: args.title };
       if (args.due_date) body.dueDateTime = { dateTime: args.due_date, timeZone: "UTC" };
       if (args.notes) body.body = { content: args.notes, contentType: "text" };
-      const res = await client.api(`/me/todo/lists/${args.list_id}/tasks`).post(body);
+      const res = await client.api(`/me/todo/lists/${idSegment(args.list_id, "list_id")}/tasks`).post(body);
       return { id: res.id, title: res.title, status: res.status };
     }
     case "complete_task": {
       if (!args.list_id || !args.task_id) throw new Error("list_id and task_id required");
       const res = await client
-        .api(`/me/todo/lists/${args.list_id}/tasks/${args.task_id}`)
+        .api(`/me/todo/lists/${idSegment(args.list_id, "list_id")}/tasks/${idSegment(args.task_id, "task_id")}`)
         .patch({ status: "completed" });
       return { id: res.id, title: res.title, status: res.status };
     }

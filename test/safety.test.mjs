@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { buildEmailFilter, odataString, safeLocalPath } from "../dist/safety.js";
+import { buildEmailFilter, idSegment, odataString, safeLocalPath } from "../dist/safety.js";
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "m365-safety-"));
@@ -44,4 +44,14 @@ test("buildEmailFilter escapes sender and subject", () => {
     "from/emailAddress/address eq 'a''b@x.com' and contains(subject,'it''s') and isRead eq false",
   );
   assert.equal(buildEmailFilter({}), "");
+});
+
+test("idSegment percent-encodes ids so they cannot add path segments or queries", () => {
+  assert.equal(idSegment("AAMk/../me?x=1", "message_id"), "AAMk%2F..%2Fme%3Fx%3D1");
+  assert.equal(idSegment("AQMkADAw=", "file_id"), "AQMkADAw%3D");
+});
+
+test("idSegment rejects empty ids with the parameter name", () => {
+  assert.throws(() => idSegment("  ", "list_id"), /list_id cannot be empty/);
+  assert.throws(() => idSegment(undefined, "task_id"), /task_id cannot be empty/);
 });

@@ -32,3 +32,10 @@ export function buildEmailFilter(args: { sender?: string; subject?: string; unre
   if (args.unread_only) filters.push("isRead eq false");
   return filters.join(" and ");
 }
+
+// One Graph path segment built from a caller-supplied id: "a/../b?x" must not
+// change the endpoint the request hits.
+export function idSegment(id: string | undefined, param: string): string {
+  if (!id || !String(id).trim()) throw new Error(`${param} cannot be empty`);
+  return encodeURIComponent(String(id));
+}
