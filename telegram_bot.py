@@ -800,6 +800,21 @@ def get_attachment(msg_id):
             })
     return attachments
 
+def safe_attachment_path(folder, name):
+    """Destino local para un adjunto. El nombre lo pone el remitente: «../../.zshrc»
+    no puede salir de `folder` y un fichero existente no se pisa."""
+    last = re.split(r"[\\/]", str(name or ""))[-1]
+    clean = re.sub(r"[\x00-\x1f]", "", last).strip()
+    if clean in ("", ".", ".."):
+        clean = "adjunto"
+    stem, ext = os.path.splitext(clean)
+    candidate = os.path.join(folder, clean)
+    n = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(folder, f"{stem} ({n}){ext}")
+        n += 1
+    return candidate
+
 # ─── Inline Keyboards ──────────────────────────────────────────────────────────
 
 def main_keyboard():
@@ -1380,11 +1395,11 @@ def handle_message(chat_id, text):
                 os.makedirs(ATTACH_DIR, exist_ok=True)
                 filenames = []
                 for att in atts:
-                    fpath = os.path.join(ATTACH_DIR, att["name"])
+                    fpath = safe_attachment_path(ATTACH_DIR, att["name"])
                     data = base64.b64decode(att["bytes"])
                     with open(fpath, "wb") as f:
                         f.write(data)
-                    filenames.append(f"{att['name']} ({len(data)} bytes)")
+                    filenames.append(f"{os.path.basename(fpath)} ({len(data)} bytes)")
                 send_telegram(chat_id,
                     "📎 *Adjuntos guardados en el servidor:*\n\n" +
                     "\n".join(f"  • {n}" for n in filenames))

@@ -343,3 +343,22 @@ class TestAutoClassifyProposes(_ClassifyFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSafeAttachmentPath(unittest.TestCase):
+    """Nombre de adjunto = dato del remitente: no puede salir de ATTACH_DIR ni pisar ficheros."""
+
+    def test_traversal_stays_in_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            for evil in ["../../.zshrc", "/etc/passwd", "..\\..\\evil.bat", "a/b/c.txt"]:
+                self.assertEqual(os.path.dirname(bot.safe_attachment_path(d, evil)), d, evil)
+
+    def test_empty_or_dots_get_default_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            for bad in ["", ".", "..", "   ", None]:
+                self.assertEqual(os.path.basename(bot.safe_attachment_path(d, bad)), "adjunto")
+
+    def test_does_not_overwrite(self):
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "f.pdf"), "w").close()
+            self.assertEqual(os.path.basename(bot.safe_attachment_path(d, "f.pdf")), "f (1).pdf")
