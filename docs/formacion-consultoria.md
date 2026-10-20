@@ -114,7 +114,7 @@ Edita `taxonomy.json`:
     {
       "folder": "Carpeta/Destino",
       "keywords": ["palabra1", "palabra2"],
-      "if_sender": "remitente@email.com",
+      "if_sender": "sender@example.com",
       "if_subject_contains": "texto en asunto"
     }
   ]
@@ -190,10 +190,9 @@ TELEGRAM_ALLOWED_USER_ID=123456789
 4. Arrancar: `python telegram_bot.py`
 
 ### Configurar como servicio (Mac)
-```bash
-# LaunchAgent para arranque automático
-# Ver ~/Library/LaunchAgents/com.luisfran.m365-telegram-bot.plist como ejemplo
-```
+El arranque automático requiere un LaunchAgent propio que use rutas absolutas a
+Python y al bot. Este repositorio no incluye un archivo `.plist` listo para instalar;
+comprueba primero el arranque manual con tu configuración.
 
 ### Configurar como servicio (Windows)
 ```powershell
@@ -243,7 +242,14 @@ El MCP server corre en local y los tokens de Microsoft se guardan solo en tu dis
 **No son los mínimos**: las 13 herramientas del servidor usan un subconjunto (`src/index.ts` pide 8). Antes de desplegar en un cliente, recorta `GRAPH_SCOPES` a lo que de verdad vaya a usar — sobre todo `Sites.ReadWrite.All` y `Chat.ReadWrite`, que dan acceso amplio.
 
 **¿Puedo limitar las carpetas que clasifica?**
-Sí. `taxonomy.json` solo define las reglas que tú pongas. Si no pones reglas para una carpeta, el bot no la toca.
+Una configuración local válida en `taxonomy.json` sustituye por completo las reglas
+de ejemplo. Solo sus destinos participan en la clasificación. Revisa siempre el
+plan antes de aplicarlo; la clasificación automática con aplicación directa es
+una opción explícita de configuración.
 
 **¿Qué pasa si taxonomy.json tiene errores?**
-El bot carga el fallback hardcodeado (7 reglas básicas) y sigue funcionando. Log del error en `dist/bot.log`.
+Si el archivo falta, contiene JSON inválido o no contiene reglas válidas, el bot
+carga siete categorías genéricas de ejemplo. No contienen nombres de personas ni
+proveedores y sus destinos pueden no coincidir con tu buzón: revisa o configura
+`taxonomy.json` antes de aplicar el plan. El error de lectura se registra en
+`dist/bot.log`. Esta preparación no cambia ese comportamiento de fallback.
