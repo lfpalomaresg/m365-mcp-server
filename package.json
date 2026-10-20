@@ -1,6 +1,7 @@
 {
   "name": "m365-mcp-server",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "Microsoft 365 MCP Server for Claude Code",
   "main": "dist/index.js",
   "scripts": {

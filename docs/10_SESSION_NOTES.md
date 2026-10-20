@@ -3,7 +3,7 @@
 ## 2026-09-16 — Claude Code (Mac) — Revisión del trabajo de DeepSeek + endurecimiento
 
 ### Hecho
-- Reconciliado con `origin/main` (`542776d`, HP): los scripts env-sync del HP son los canónicos; las copias locales de DeepSeek (sin trackear, distintas) se apartaron. `cred-store.sh` apunta a la entrada de Keychain que ya existía en el Mac (servicio `com.luisfran.m365-mcp-server`, cuenta `bw-session-env-sync`). Scripts con `+x`.
+- Reconciliado con `origin/main` (`542776d`, Windows): los scripts env-sync de Windows son los canónicos; las copias locales de DeepSeek (sin trackear, distintas) se apartaron. `cred-store.sh` conserva el identificador de la entrada de Keychain ya configurada para mantener la compatibilidad local. Scripts con `+x`.
 - 🔒 Token del bot: `sanitize_url` no lo enmascaraba (el `:` del token rompía la regex) y salía en claro en `dist/bot.log` en cada error de red (68 líneas del 13 al 15/09, ya redactadas). Ahora `log()` redacta siempre.
 - Responder por lenguaje natural pide confirmación (`confirm_reply`); antes enviaba directamente lo que interpretaba el LLM.
 - El log de lenguaje natural ya no guarda el texto ni los params (llevaban destinatarios y cuerpos).
@@ -15,7 +15,7 @@
 - Auto-clasificación (decisión del operador, mismo día): keywords como palabra completa (antes `agua` casaba «paraguas» y `cargo` «encargo»); por defecto **propone** con botón Aplicar y no repite la misma propuesta en cada intervalo (`auto_classify_tick`); `TELEGRAM_AUTO_CLASSIFY_APPLY=true` recupera el mover sin confirmar. +4 tests con rojo visto.
 
 ### Pendiente
-- Los nombres de personas siguen en el fallback hardcodeado de `load_taxonomy()` (ya estaban commiteados antes de esta sesión).
+- En esta fecha, el fallback de `load_taxonomy()` conservaba nombres de personas. Se retiraron del código actual en la preparación OSS del 20/10/2026; el historial anterior no se ha reescrito.
 
 ### Decidido
 - Todo cliente de LLM local va por alias de LiteLLM, nunca contra un modelo fijo de LM Studio.
@@ -78,3 +78,10 @@
 
 ### Decidido
 - Datos externos (nombres, asuntos, ids, rangos) se tratan como no confiables: se validan/escapan en helpers puros antes de tocar disco, URL u OData.
+
+## 2026-10-20 — Preparación OSS: reglas de clasificación genéricas
+
+- Eliminados nombres de personas y proveedores del fallback de `load_taxonomy()` y la ruta personal de la cabecera del bot.
+- Se conservan las siete categorías de ejemplo; una taxonomía local válida sigue sustituyendo por completo esas reglas.
+- La ausencia de `taxonomy.json`, un JSON inválido o un listado sin reglas válidas mantienen el fallback de ejemplo. Hay que revisar sus destinos antes de aplicar una clasificación; no representan la estructura de todos los buzones.
+- Se añaden pruebas offline de la precedencia de la configuración local y del fallback ante JSON inválido. Esto no verifica movimientos reales en Outlook.
