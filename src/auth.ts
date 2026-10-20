@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { PublicClientApplication } from "@azure/msal-node";
 import { fileCachePlugin } from "./token-cache.js";
+import { resolveTokenCachePath } from "./config.js";
 import * as dotenv from "dotenv";
 import * as path from "path";
 import * as http from "http";
@@ -12,12 +13,7 @@ dotenv.config({ path: path.join(__dirname, "../.env") });
 const CLIENT_ID = process.env.CLIENT_ID ?? "";
 const TENANT_ID = process.env.TENANT_ID ?? "common";
 
-// Resolvemos el cache a ruta absoluta anclada a la raíz del proyecto para que `npm run auth`
-// y el server MCP (lanzado por Claude Code desde otro CWD) escriban/lean SIEMPRE el mismo
-// archivo. Si no, una ruta relativa en .env produce "No active session found". Ver README.
-const PROJECT_ROOT = path.join(__dirname, "..");
-const rawCachePath = process.env.TOKEN_CACHE_PATH ?? ".token_cache.json";
-const TOKEN_CACHE_PATH = path.isAbsolute(rawCachePath) ? rawCachePath : path.join(PROJECT_ROOT, rawCachePath);
+const TOKEN_CACHE_PATH = resolveTokenCachePath();
 const REDIRECT_URI = "http://localhost:3000";
 
 const GRAPH_SCOPES = [
