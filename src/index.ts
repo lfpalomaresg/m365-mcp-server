@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { PublicClientApplication } from "@azure/msal-node";
 import { fileCachePlugin } from "./token-cache.js";
+import { resolveTokenCachePath } from "./config.js";
 import { Client, ResponseType } from "@microsoft/microsoft-graph-client";
 import "isomorphic-fetch";
 import * as dotenv from "dotenv";
@@ -31,10 +32,7 @@ function requireEnv(name: string): string {
 const CLIENT_ID = requireEnv("CLIENT_ID");
 const TENANT_ID = process.env.TENANT_ID ?? "common";
 
-const TOKEN_CACHE_DIR = path.join(os.homedir(), ".m365-mcp");
-const TOKEN_CACHE_PATH = process.env.TOKEN_CACHE_PATH ?
-  process.env.TOKEN_CACHE_PATH :
-  path.join(TOKEN_CACHE_DIR, ".token_cache.json");
+const TOKEN_CACHE_PATH = resolveTokenCachePath();
 const DOWNLOAD_PATH = process.env.DOWNLOAD_PATH ??
   path.join(os.homedir(), "Downloads", "m365-mcp");
 
