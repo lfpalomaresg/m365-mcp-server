@@ -1,4 +1,4 @@
-# G:\Mi unidad\claude_workspace\m365_mcp_server\telegram_bot.py
+# telegram_bot.py — optional Telegram interface for this MCP project
 # Telegram Bot for Outlook M365 Automation (Windows/Mac/Mobile)
 # Runs 100% natively with ZERO external dependencies (stdlib only)
 
@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.error
 from datetime import datetime, timezone, timedelta
 
-APP_DIR = os.path.dirname(__file__)
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DIST_DIR = os.path.join(APP_DIR, "dist")
 STATE_FILE = os.path.join(DIST_DIR, "_bot_state.json")
 LOG_FILE = os.path.join(DIST_DIR, "bot.log")
@@ -174,7 +174,21 @@ def load_state():
 
 # ─── Token & HTTP ──────────────────────────────────────────────────────────────
 
-TOKEN_CACHE_PATH = os.path.join(os.path.expanduser("~"), ".m365-mcp", ".token_cache.json")
+def resolve_token_cache_path(configured_path, project_root=APP_DIR, home_dir=None):
+    """Mismo contrato que src/config.ts; nunca depende del directorio de trabajo."""
+    cache_path = (configured_path or "").strip()
+    # load_env es un lector sencillo; dotenv también admite comillas en .env.
+    if len(cache_path) >= 2 and cache_path[0] == cache_path[-1] and cache_path[0] in "\"'":
+        cache_path = cache_path[1:-1].strip()
+    if cache_path:
+        return os.path.abspath(os.path.join(project_root, cache_path))
+    return os.path.join(home_dir or os.path.expanduser("~"), ".m365-mcp", ".token_cache.json")
+
+
+# Como dotenv en Node, las variables del proceso prevalecen sobre .env.
+TOKEN_CACHE_PATH = resolve_token_cache_path(
+    os.environ.get("TOKEN_CACHE_PATH", env.get("TOKEN_CACHE_PATH"))
+)
 GRAPH_SCOPES_STR = "Mail.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Files.ReadWrite.All Tasks.ReadWrite offline_access"
 
 def _read_token_from_cache():
@@ -549,15 +563,15 @@ def load_taxonomy():
                 log("taxonomy.json found but contains no valid rules, using defaults")
         except (json.JSONDecodeError, OSError) as e:
             log(f"Error loading taxonomy.json: {e}, using defaults")
-    # Fallback: hardcoded
+    # Generic examples only; a valid local taxonomy.json replaces these rules.
     TAXONOMY = [
-        {"folder": "01_OPERATIVA/01_RRHH", "keywords": ["baja", "nomina", "trabajadora", "sara rengel", "rosa santos", "excedencia", "lyf", "finiquito", "contrato"]},
-        {"folder": "01_OPERATIVA/02_COMERCIAL_EVENTOS", "keywords": ["stop sales", "cierre de ventas", "tarifa fit", "ttoo", "almudena ayuso", "cierre ventas"]},
+        {"folder": "01_OPERATIVA/01_RRHH", "keywords": ["baja", "nomina", "trabajadora", "excedencia", "finiquito", "contrato"]},
+        {"folder": "01_OPERATIVA/02_COMERCIAL_EVENTOS", "keywords": ["stop sales", "cierre de ventas", "tarifa fit", "ttoo", "cierre ventas"]},
         {"folder": "01_OPERATIVA/03_FINANZAS", "keywords": ["arqueo", "caja", "cierre de caja", "factura", "abono", "cargo", "no-show", "no show", "no presentado"]},
-        {"folder": "00_CONTROL_DIARIO/07_REVISAR_EVENTOS_BODAS_GRUPOS", "keywords": ["grupo", "rooming", "roster", "coctel", "degustacion", "ods", "orden de servicio", "sunshine weddings", "rick steves", "lauren crumplin"]},
-        {"folder": "00_CONTROL_DIARIO/08_REVISAR_INCIDENCIAS_AVERIAS", "keywords": ["sancion", "multa", "incidencia", "averia", "sixt", "carcagno"]},
-        {"folder": "01_OPERATIVA/08_MARKETING", "keywords": ["newsletter", "substack", "hosteltur", "agoda", "groupon", "raiola", "eoi", "awards", "smart travel"]},
-        {"folder": "PEDIDOS", "keywords": ["pedido", "albaran", "frutas eladio", "ly company", "qualianza", "calidad pascual", "huevos", "leche", "agua"]},
+        {"folder": "00_CONTROL_DIARIO/07_REVISAR_EVENTOS_BODAS_GRUPOS", "keywords": ["grupo", "rooming", "roster", "coctel", "degustacion", "ods", "orden de servicio"]},
+        {"folder": "00_CONTROL_DIARIO/08_REVISAR_INCIDENCIAS_AVERIAS", "keywords": ["sancion", "multa", "incidencia", "averia"]},
+        {"folder": "01_OPERATIVA/08_MARKETING", "keywords": ["newsletter", "marketing", "publicidad", "campaña"]},
+        {"folder": "PEDIDOS", "keywords": ["pedido", "albaran", "huevos", "leche", "agua"]},
     ]
     _keyword_index = _build_keyword_index(TAXONOMY)
     _taxonomy_mtime = 0
