@@ -26,13 +26,17 @@ Formato: [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) · versionado 
   cualquier trozo que no se entregue.
 
 ### Añadido
+- El bot respeta `M365_READ_ONLY=1`: bloquea enviar, responder, marcar, archivar, borrar y
+  aplicar el plan, con aviso explícito; leer/buscar/ver siguen funcionando.
+  `test/test_politicas_bot.py` (5 tests).
 - Rotación de `dist/bot.log` a 5 MB (una copia `.1`): en una instalación llegó a 2,7 GB.
 - `src/policy.ts` (sin efectos, testeable) y `test/policy.test.mjs` (8 tests).
 - `test/test_fragmentos.py` (9 tests) para el troceo.
 - `README.en.md` completo y este CHANGELOG.
 
 ### Documentado
-- Las tres políticas (`M365_READ_ONLY`, `M365_CONFIRM_WRITES`, `M365_MINIMAL_SCOPES`)
-  aplican **solo al servidor MCP**; el bot de Telegram no las lee.
+- `M365_READ_ONLY` y `M365_MINIMAL_SCOPES` aplican **también al bot de Telegram**;
+  `M365_CONFIRM_WRITES` es solo del servidor MCP (el bot ya confirma por botones).
+- Rotación del log del bot: 5 MB y una sola copia `.1`.
 - Límites reales: monousuario, sin aislamiento entre usuarios, disponibilidad según
   tipo de cuenta y permisos de Microsoft.

@@ -30,8 +30,9 @@ Telegram mail bot written with the Python standard library.
 
 Write tools execute when called. There is no hidden approval loop; the server gives
 you three explicit policies instead (set in `.env`, see `.env.example`).
-**Scope:** these policies apply to the MCP server only — the optional Telegram bot does
-not read them and keeps its own confirmation flow.
+**Scope:** `M365_READ_ONLY` and `M365_MINIMAL_SCOPES` apply to **both** the MCP server and
+the Telegram bot. `M365_CONFIRM_WRITES` applies to the MCP server only: the bot already
+has its own two-step confirmation buttons.
 
 | Variable | Effect |
 |---|---|
@@ -120,7 +121,7 @@ it before granting. `npm run auth` starts the local callback and opens the brows
 ## Tests
 
 ```bash
-npm test     # tsc + node --test (41) + pytest (86), no network, no real accounts
+npm test     # tsc + node --test (41) + pytest (91), no network, no real accounts
 ```
 
 Fictional values and simulated services only. The suite verifies validation, simulated

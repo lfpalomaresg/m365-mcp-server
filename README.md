@@ -38,8 +38,10 @@ El servidor reintenta los `429`/`503`/`504` de Graph (3 intentos, respeta `Retry
 veces. Los mensajes de Telegram de más de 4096 caracteres se trocean (midiendo en unidades
 UTF-16, que es como los cuenta Telegram).
 
-Estas políticas aplican **solo al servidor MCP**; el bot de Telegram tiene su propio flujo de
-confirmación y no las lee.
+`M365_READ_ONLY` y `M365_MINIMAL_SCOPES` aplican **también al bot de Telegram** (leer, buscar,
+ver y listar siguen funcionando; enviar, responder, marcar, archivar, borrar y aplicar el plan
+quedan bloqueados con un aviso). `M365_CONFIRM_WRITES` es solo del servidor MCP: el bot ya
+tiene su propia confirmación en dos pasos por botones.
 
 ## Requisitos y alcance
 

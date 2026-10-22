@@ -206,6 +206,27 @@ def resolve_token_cache_path(configured_path, project_root=APP_DIR, home_dir=Non
 TOKEN_CACHE_PATH = resolve_token_cache_path(
     os.environ.get("TOKEN_CACHE_PATH", env.get("TOKEN_CACHE_PATH"))
 )
+SOLO_LECTURA_ENV = "M365_READ_ONLY"
+
+
+def solo_lectura_activo(valor=None):
+    """M365_READ_ONLY=1: el bot no modifica el buzón (leer, buscar y ver siguen).
+
+    Misma variable que el servidor MCP. Acepta un valor explícito para poder
+    probarlo sin tocar el entorno.
+    """
+    if valor is None:
+        valor = os.environ.get(SOLO_LECTURA_ENV, env.get(SOLO_LECTURA_ENV, ""))
+    return str(valor).strip() == "1"
+
+
+def aviso_solo_lectura(accion):
+    return (
+        f"🔒 *Modo solo lectura*\n\n«{accion}» modifica tu buzón y está bloqueada "
+        f"(`{SOLO_LECTURA_ENV}=1`). Quita la variable de `.env` y reinicia el bot para habilitarla."
+    )
+
+
 # M365_MINIMAL_SCOPES=1 alinea el bot con los scopes que el servidor usa de verdad.
 if str(os.environ.get("M365_MINIMAL_SCOPES", env.get("M365_MINIMAL_SCOPES", ""))).strip() == "1":
     GRAPH_SCOPES_STR = "User.Read Mail.Read Mail.Send Calendars.ReadWrite Files.ReadWrite.All Tasks.ReadWrite offline_access"
@@ -571,10 +592,16 @@ def get_message_body(msg_id):
     }
 
 def mark_read(msg_id):
+    if solo_lectura_activo():
+        log("bloqueado mark_read por M365_READ_ONLY=1")
+        return False
     res = call_graph(f"/me/messages/{msg_id}", method="PATCH", body={"isRead": True})
     return res and "_error" not in res
 
 def archive_message(msg_id):
+    if solo_lectura_activo():
+        log("bloqueado archive_message por M365_READ_ONLY=1")
+        return False
     folder_id = get_archive_folder_id()
     if not folder_id:
         return False
@@ -583,10 +610,16 @@ def archive_message(msg_id):
     return res and "_error" not in res
 
 def delete_message(msg_id):
+    if solo_lectura_activo():
+        log("bloqueado delete_message por M365_READ_ONLY=1")
+        return False
     res = call_graph(f"/me/messages/{msg_id}", method="DELETE")
     return res is not None and "_error" not in res
 
 def reply_message(msg_id, comment):
+    if solo_lectura_activo():
+        log("bloqueado reply_message por M365_READ_ONLY=1")
+        return False
     res = call_graph(f"/me/messages/{msg_id}/reply", method="POST",
                      body={"comment": comment})
     return res is not None and "_error" not in res
@@ -742,6 +775,9 @@ def classify_unread(chat_id=None, apply_now=False):
     return msg
 
 def apply_plan(proposed=None):
+    if solo_lectura_activo():
+        log("bloqueado apply_plan por M365_READ_ONLY=1")
+        return aviso_solo_lectura("aplicar el plan de clasificación")
     if proposed is None:
         if not os.path.exists(PLAN_FILE):
             return "No hay plan pendiente. Usa Clasificar primero."
@@ -879,6 +915,9 @@ def get_todo_tasks():
 # ─── Send Email ────────────────────────────────────────────────────────────────
 
 def send_email_via_graph(to, subject, body):
+    if solo_lectura_activo():
+        log("bloqueado send_email_via_graph por M365_READ_ONLY=1")
+        return False
     res = call_graph("/me/sendMail", method="POST", body={
         "message": {
             "subject": subject,
@@ -1256,6 +1295,12 @@ def handle_callback(chat_id, data, cb_id):
             return
 
         if data == "confirm_send":
+            if solo_lectura_activo():
+                user_state.pop(chat_id, None)
+                save_state()
+                send_telegram(chat_id, aviso_solo_lectura("enviar un correo"),
+                              reply_markup=main_keyboard())
+                return
             st = user_state.get(chat_id, {})
             if st.get("state") != "waiting_confirm" or not st.get("to") or "body" not in st:
                 user_state.pop(chat_id, None)
@@ -1273,6 +1318,11 @@ def handle_callback(chat_id, data, cb_id):
             return
 
         if data == "confirm_reply":
+            if solo_lectura_activo():
+                user_state.pop(chat_id, None)
+                save_state()
+                send_telegram(chat_id, aviso_solo_lectura("responder"), reply_markup=main_keyboard())
+                return
             st = user_state.get(chat_id, {})
             user_state.pop(chat_id, None)
             save_state()
@@ -1288,6 +1338,9 @@ def handle_callback(chat_id, data, cb_id):
         # Email actions: leido:N / archivar:N / eliminar:N / responder:N
         if ":" in data:
             action, short_id = data.split(":", 1)
+            if action in ("leido", "archivar", "eliminar") and solo_lectura_activo():
+                send_telegram(chat_id, aviso_solo_lectura(action), reply_markup=main_keyboard())
+                return
             mapping = last_results.get(str(chat_id), {})
             msg_id = mapping.get(short_id)
             if not msg_id:
@@ -1303,6 +1356,9 @@ def handle_callback(chat_id, data, cb_id):
                 ok = delete_message(msg_id)
                 send_telegram(chat_id, "🗑 Eliminado." if ok else "❌ Error.", reply_markup=main_keyboard())
             elif action == "responder":
+                if solo_lectura_activo():
+                    send_telegram(chat_id, aviso_solo_lectura("responder"), reply_markup=main_keyboard())
+                    return
                 user_state[chat_id] = {"state": "waiting_reply_body", "reply_to": msg_id}
                 save_state()
                 send_telegram(chat_id, "↩️ Escribe el texto de tu respuesta:")
@@ -1373,6 +1429,12 @@ def handle_message(chat_id, text):
                 return
 
             if state_name == "waiting_reply_body":
+                if solo_lectura_activo():
+                    user_state.pop(chat_id, None)
+                    save_state()
+                    send_telegram(chat_id, aviso_solo_lectura("responder"),
+                                  reply_markup=main_keyboard())
+                    return
                 reply_to = st.get("reply_to")
                 user_state.pop(chat_id, None)
                 save_state()
@@ -1402,7 +1464,11 @@ def handle_message(chat_id, text):
             send_telegram(chat_id, resp, reply_markup=keyboard)
 
         elif cmd == "/aplicar":
-            send_telegram(chat_id, apply_plan(), reply_markup=main_keyboard())
+            if solo_lectura_activo():
+                send_telegram(chat_id, aviso_solo_lectura("aplicar"),
+                              reply_markup=main_keyboard())
+            else:
+                send_telegram(chat_id, apply_plan(), reply_markup=main_keyboard())
 
         elif cmd == "/ver":
             parts = text.split(" ", 1)
@@ -1424,6 +1490,10 @@ def handle_message(chat_id, text):
             send_telegram(chat_id, handle_buscar(chat_id, query), reply_markup=main_keyboard())
 
         elif cmd == "/enviar":
+            if solo_lectura_activo():
+                send_telegram(chat_id, aviso_solo_lectura("enviar un correo"),
+                              reply_markup=main_keyboard())
+                return
             user_state[chat_id] = {"state": "waiting_to"}
             save_state()
             send_telegram(chat_id, "✉️ *Enviar correo*\n\nDestinatario (email):")
@@ -1540,6 +1610,10 @@ def handle_message(chat_id, text):
                 elif action == "tareas":
                     send_telegram(chat_id, handle_tareas(chat_id))
                 elif action == "enviar":
+                    if solo_lectura_activo():
+                        send_telegram(chat_id, aviso_solo_lectura("enviar un correo"),
+                                      reply_markup=main_keyboard())
+                        return
                     to = params.get("to", "")
                     subj = params.get("subject", "")
                     body_text = params.get("body", "")
@@ -1570,6 +1644,10 @@ def handle_message(chat_id, text):
                     else:
                         send_telegram(chat_id, "¿Qué número de correo quieres leer? Usa /hoy o /buscar primero.")
                 elif action == "responder":
+                    if solo_lectura_activo():
+                        send_telegram(chat_id, aviso_solo_lectura("responder"),
+                                      reply_markup=main_keyboard())
+                        return
                     num = params.get("num", "")
                     reply_text = params.get("text", "")
                     if num and reply_text:
