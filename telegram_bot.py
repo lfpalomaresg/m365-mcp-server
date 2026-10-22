@@ -34,11 +34,28 @@ def _redact(text):
     text = re.sub(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*", "<jwt>", text)
     return re.sub(r"(?i)\b((?:access|refresh|id)_token=)[^&\s]+", r"\1<token>", text)
 
+LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _rotar_log(si_supera=LOG_MAX_BYTES):
+    """Rota bot.log si pasa del límite: bot.log -> bot.log.1 (una sola copia).
+
+    Sin esto el log crecía sin freno (2,7 GB el 21/10/2026 en una instalación).
+    Se rota por tamaño, no por fecha: el bot no siempre está arrancado.
+    """
+    try:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > si_supera:
+            os.replace(LOG_FILE, LOG_FILE + ".1")
+    except OSError:
+        pass
+
+
 def log(msg):
     line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {_redact(msg)}"
     print(line)
     try:
         os.makedirs(DIST_DIR, exist_ok=True)
+        _rotar_log()
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
@@ -189,7 +206,11 @@ def resolve_token_cache_path(configured_path, project_root=APP_DIR, home_dir=Non
 TOKEN_CACHE_PATH = resolve_token_cache_path(
     os.environ.get("TOKEN_CACHE_PATH", env.get("TOKEN_CACHE_PATH"))
 )
-GRAPH_SCOPES_STR = "Mail.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Files.ReadWrite.All Tasks.ReadWrite offline_access"
+# M365_MINIMAL_SCOPES=1 alinea el bot con los scopes que el servidor usa de verdad.
+if str(os.environ.get("M365_MINIMAL_SCOPES", env.get("M365_MINIMAL_SCOPES", ""))).strip() == "1":
+    GRAPH_SCOPES_STR = "User.Read Mail.Read Mail.Send Calendars.ReadWrite Files.ReadWrite.All Tasks.ReadWrite offline_access"
+else:
+    GRAPH_SCOPES_STR = "User.Read Mail.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Files.ReadWrite.All Tasks.ReadWrite offline_access"
 
 def _read_token_from_cache():
     """Lee el access token directamente del cache MSAL sin spawnear Node.js.
@@ -267,17 +288,78 @@ def sanitize_url(url):
     # Also mask message/folder ids (long base64-like tokens) in the path.
     return re.sub(r"/[A-Za-z0-9_\-]{20,}", "/<id>", base)
 
+LIMITE_TELEGRAM = 4096
+# Telegram cuenta unidades UTF-16 (un emoji son 2) y hay emoji en los avisos
+# del bot y en los cuerpos de correo: se deja margen para no dar 400.
+MARGEN_TELEGRAM = 3900
+
+
+def _unidades_utf16(texto):
+    """Longitud tal como la cuenta Telegram (UTF-16), no en code points."""
+    return len(texto.encode("utf-16-le")) // 2
+
+
+def _corte_por_unidades(texto, limite):
+    """Índice de corte que deja como mucho `limite` unidades UTF-16."""
+    acumulado = 0
+    for i, ch in enumerate(texto):
+        acumulado += len(ch.encode("utf-16-le")) // 2
+        if acumulado > limite:
+            return i
+    return len(texto)
+
+
+def trocear_mensaje(texto, limite=MARGEN_TELEGRAM):
+    """Parte un texto en trozos que Telegram acepta (< 4096 unidades UTF-16).
+
+    Corta por el último salto de línea que quepa en el trozo, no por espacios:
+    partir una entidad Markdown (`*negrita*`) a la mitad hace que Telegram
+    rechace el mensaje entero. Sin saltos de línea (cuerpos de una sola línea),
+    corta por unidades, que es el único límite seguro.
+    Los trozos concatenados reproducen el texto original carácter a carácter.
+    """
+    texto = texto or ""
+    if not texto:
+        return []
+    if _unidades_utf16(texto) <= limite:
+        return [texto]
+    trozos = []
+    resto = texto
+    while _unidades_utf16(resto) > limite:
+        acumulado = 0
+        corte = 0
+        for i, ch in enumerate(resto):
+            acumulado += len(ch.encode("utf-16-le")) // 2
+            if acumulado > limite:
+                break
+            if ch == "\n":
+                corte = i + 1
+        if corte <= 0:
+            corte = _corte_por_unidades(resto, limite) or limite
+        trozos.append(resto[:corte])
+        resto = resto[corte:]
+    if resto:
+        trozos.append(resto)
+    return trozos
+
+
 def send_telegram(chat_id, text, reply_markup=None):
-    make_request(
-        f"{TELEGRAM_API_URL}/sendMessage",
-        method="POST",
-        body={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-            **({"reply_markup": reply_markup} if reply_markup else {})
-        }
-    )
+    trozos = trocear_mensaje(text)
+    for i, trozo in enumerate(trozos):
+        res = make_request(
+            f"{TELEGRAM_API_URL}/sendMessage",
+            method="POST",
+            body={
+                "chat_id": chat_id,
+                "text": trozo,
+                "parse_mode": "Markdown",
+                # El teclado va solo en el último trozo, para que no se duplique.
+                **({"reply_markup": reply_markup} if reply_markup and i == len(trozos) - 1 else {})
+            }
+        )
+        if isinstance(res, dict) and res.get("_error"):
+            # Nunca en silencio: un trozo perdido es contenido perdido.
+            log(f"send_telegram: trozo {i + 1}/{len(trozos)} no entregado ({res.get('_error')})")
 
 def edit_telegram(chat_id, message_id, text, reply_markup=None):
     make_request(
@@ -960,7 +1042,7 @@ def handle_ver(chat_id, short_id):
         f"📧 *{md_escape(body['subject'])}*\n"
         f"De: {md_escape(body['from'])}\n"
         f"Recibido: {body['received'][:16].replace('T', ' ')}\n\n"
-        f"{md_escape(body['body'][:1500])}"
+        f"{md_escape(body['body'])}"
     )
     return text
 

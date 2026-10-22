@@ -24,7 +24,22 @@ El proyecto nació para uso propio con Claude Code. La configuración de ese cli
 | `manage_todo_tasks` | Listar, crear o completar tareas | Lectura o escritura remota |
 | `sync_calendar_events` | Listar o crear eventos | Lectura o escritura remota; puede enviar invitaciones |
 
-Las herramientas con escritura ejecutan la operación al invocarse. El servidor no incorpora una confirmación humana adicional: configura las aprobaciones del cliente MCP y revisa destinatarios, rutas y contenido antes de autorizar una acción.
+Las herramientas con escritura ejecutan la operación al invocarse. Para reducirlo hay tres
+políticas opcionales (en `.env`, ver `.env.example`):
+
+| Variable | Efecto |
+|---|---|
+| `M365_READ_ONLY=1` | Bloquea **todas** las escrituras; las lecturas siguen funcionando |
+| `M365_CONFIRM_WRITES=1` | Cada escritura exige `"confirm": true` en la llamada (dos pasos) |
+| `M365_MINIMAL_SCOPES=1` | El login pide solo los permisos que el servidor usa (requiere reautenticar) |
+
+El servidor reintenta los `429`/`503`/`504` de Graph (3 intentos, respeta `Retry-After`)
+**salvo en `POST`**, que no es idempotente: reintentar `sendMail` podría enviar el correo dos
+veces. Los mensajes de Telegram de más de 4096 caracteres se trocean (midiendo en unidades
+UTF-16, que es como los cuenta Telegram).
+
+Estas políticas aplican **solo al servidor MCP**; el bot de Telegram tiene su propio flujo de
+confirmación y no las lee.
 
 ## Requisitos y alcance
 

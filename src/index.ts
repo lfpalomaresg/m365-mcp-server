@@ -5,6 +5,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { PublicClientApplication } from "@azure/msal-node";
 import { fileCachePlugin } from "./token-cache.js";
 import { resolveTokenCachePath } from "./config.js";
+import { assertToolAllowed, resolveScopes } from "./policy.js";
+import { buildGraphClient } from "./graph.js";
 import { Client, ResponseType } from "@microsoft/microsoft-graph-client";
 import "isomorphic-fetch";
 import * as dotenv from "dotenv";
@@ -38,16 +40,8 @@ const DOWNLOAD_PATH = process.env.DOWNLOAD_PATH ??
 
 // ─── Token Cache ──────────────────────────────────────────────────────────────
 
-const GRAPH_SCOPES = [
-  "User.Read",
-  "Mail.Read",
-  "Mail.ReadWrite",
-  "Mail.Send",
-  "Calendars.ReadWrite",
-  "Files.ReadWrite.All",
-  "Tasks.ReadWrite",
-  "offline_access",
-];
+// M365_MINIMAL_SCOPES=1 pide solo lo que el servidor usa de verdad.
+const GRAPH_SCOPES = resolveScopes();
 
 // ─── Token Cache ──────────────────────────────────────────────────────────────
 
@@ -82,7 +76,8 @@ async function getAccessToken(): Promise<string> {
 }
 
 function graphClient(token: string): Client {
-  return Client.init({ authProvider: (done) => done(null, token) });
+  // Cliente con retry solo para métodos idempotentes (ver src/graph.ts).
+  return buildGraphClient(token);
 }
 
 // ─── Tool: search_onedrive_files ──────────────────────────────────────────────
@@ -395,6 +390,7 @@ const TOOLS = [
         file_name: { type: "string", description: "Target filename including extension" },
         content: { type: "string", description: "File content (text, JSON, CSV, Markdown, etc.)" },
         folder_path: { type: "string", description: "OneDrive folder path e.g. 'Documents/Reports' (optional)" },
+        confirm: { type: "boolean", description: "Required when M365_CONFIRM_WRITES=1: authorise this write" },
       },
       required: ["file_name", "content"],
     },
@@ -414,6 +410,7 @@ const TOOLS = [
           description: "2D array of values for write e.g. [[1,'a'],[2,'b']]",
           items: { type: "array" },
         },
+        confirm: { type: "boolean", description: "Required when M365_CONFIRM_WRITES=1: authorise this write" },
       },
       required: ["file_id", "sheet_name", "action"],
     },
@@ -448,6 +445,7 @@ const TOOLS = [
       properties: {
         name: { type: "string", description: "New folder name" },
         parent_id: { type: "string", description: "Parent folder item ID. Omit to create in root." },
+        confirm: { type: "boolean", description: "Required when M365_CONFIRM_WRITES=1: authorise this write" },
       },
       required: ["name"],
     },
@@ -461,6 +459,7 @@ const TOOLS = [
         item_id: { type: "string", description: "ID of the file or folder to move" },
         destination_folder_id: { type: "string", description: "ID of the destination folder" },
         expected_parent_id: { type: "string", description: "Current parent ID observed during inventory; aborts if stale" },
+        confirm: { type: "boolean", description: "Required when M365_CONFIRM_WRITES=1: authorise this write" },
         expected_name: { type: "string", description: "Current item name observed during inventory; aborts if stale" },
       },
       required: ["item_id", "destination_folder_id", "expected_parent_id", "expected_name"],
@@ -489,6 +488,7 @@ const TOOLS = [
         to: { type: "array", items: { type: "string" }, description: "Recipient email addresses" },
         subject: { type: "string" },
         body: { type: "string", description: "Email body (plain text or HTML)" },
+        confirm: { type: "boolean", description: "Required when M365_CONFIRM_WRITES=1: authorise this write" },
         is_html: { type: "boolean", description: "Set true if body contains HTML" },
         cc: { type: "array", items: { type: "string" }, description: "CC recipients (optional)" },
       },
@@ -522,6 +522,7 @@ const TOOLS = [
         title: { type: "string", description: "Task title (required for create_task)" },
         due_date: { type: "string", description: "Due date ISO8601 e.g. '2025-12-31T10:00:00'" },
         notes: { type: "string", description: "Task notes" },
+        confirm: { type: "boolean", description: "Required when M365_CONFIRM_WRITES=1: authorise this write" },
       },
       required: ["action"],
     },
@@ -542,6 +543,7 @@ const TOOLS = [
         end_datetime: { type: "string", description: "End datetime ISO8601 (required for create)" },
         timezone: { type: "string", description: "Timezone e.g. 'Europe/Madrid' (default UTC)" },
         attendees: { type: "array", items: { type: "string" }, description: "Attendee emails" },
+        confirm: { type: "boolean", description: "Required when M365_CONFIRM_WRITES=1: authorise this write" },
       },
       required: ["action"],
     },
@@ -551,7 +553,7 @@ const TOOLS = [
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: "m365-personal-suite", version: "1.0.0" },
+  { name: "m365-personal-suite", version: "1.1.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -560,6 +562,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args = {} } = request.params;
   try {
+    // M365_READ_ONLY=1 bloquea escrituras; M365_CONFIRM_WRITES=1 exige confirm: true.
+    assertToolAllowed(name, args as Record<string, unknown>);
     let result: unknown;
     switch (name) {
       case "search_onedrive_files":      result = await searchOneDriveFiles(args as any); break;

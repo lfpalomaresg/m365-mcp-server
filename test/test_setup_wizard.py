@@ -27,12 +27,23 @@ def cargar_setup():
 
 
 def leer_auth_ts():
+    """Redirect de auth.ts y scopes de policy.ts (fuente única desde 2026-10-21).
+
+    auth.ts ya no lleva la lista literal: pide `resolveScopes()`, que por
+    defecto devuelve FULL_SCOPES. El asistente debe pedir exactamente eso.
+    """
     with open(os.path.join(RAIZ, "src", "auth.ts"), encoding="utf-8") as f:
         src = f.read()
+    with open(os.path.join(RAIZ, "src", "policy.ts"), encoding="utf-8") as f:
+        policy = f.read()
     redirect = re.search(r'const REDIRECT_URI = "([^"]+)"', src)
-    bloque = re.search(r"const GRAPH_SCOPES = \[(.*?)\];", src, re.S)
+    bloque = re.search(r"export const FULL_SCOPES = \[(.*?)\];", policy, re.S)
     if not redirect or not bloque:
-        raise AssertionError("No se reconoce REDIRECT_URI/GRAPH_SCOPES en src/auth.ts: el test no sabe leerlo.")
+        raise AssertionError(
+            "No se reconoce REDIRECT_URI en src/auth.ts o FULL_SCOPES en src/policy.ts: el test no sabe leerlo."
+        )
+    if "const GRAPH_SCOPES = resolveScopes();" not in src:
+        raise AssertionError("auth.ts debe pedir los scopes con resolveScopes(), no con una lista duplicada.")
     return redirect.group(1), re.findall(r'"([^"]+)"', bloque.group(1))
 
 

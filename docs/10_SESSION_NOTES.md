@@ -85,3 +85,25 @@
 - Se conservan las siete categorías de ejemplo; una taxonomía local válida sigue sustituyendo por completo esas reglas.
 - La ausencia de `taxonomy.json`, un JSON inválido o un listado sin reglas válidas mantienen el fallback de ejemplo. Hay que revisar sus destinos antes de aplicar una clasificación; no representan la estructura de todos los buzones.
 - Se añaden pruebas offline de la precedencia de la configuración local y del fallback ante JSON inválido. Esto no verifica movimientos reales en Outlook.
+
+## 2026-10-21 — Endurecimiento 1.1.0: políticas, retry seguro y troceo
+
+### Hecho
+- `src/policy.ts`: scopes de una sola fuente, clasificación lectura/escritura por acción real
+  (`list_lists`/`list_tasks` no son escritura), `M365_READ_ONLY`, `M365_CONFIRM_WRITES`,
+  `M365_MINIMAL_SCOPES` (opt-in) y `openCommand` sin shell.
+- `src/graph.ts`: cadena del SDK con `RetryHandler` propio que **no reintenta POST**;
+  `Client.initWithMiddleware` ya no mezcla `authProvider` + `middleware` (lanzaba
+  `AmbiguityInInitialization` en runtime).
+- `auth.ts`: `spawn(argv)` en vez de `exec("open …")`; Windows por `rundll32`.
+- Bot: troceo a 4096 unidades UTF-16 (emoji = 2), corte solo por saltos de línea, log de
+  trozos no entregados, `/ver` sin truncar a 1500.
+- Tests: 41 Node + 85 Python, verdes.
+
+### Pendiente
+- Aplicar `M365_READ_ONLY`/`M365_CONFIRM_WRITES` también al bot de Telegram (hoy solo MCP).
+- `edit_telegram` no trocea (sin llamadores hoy).
+
+### Decidido
+- Por defecto no cambia nada (scopes completos, sin read-only): no invalidar sesiones ya
+  concedidas. Las políticas son opt-in y se documentan como tales.

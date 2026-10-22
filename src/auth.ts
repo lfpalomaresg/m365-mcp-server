@@ -2,11 +2,12 @@
 import { PublicClientApplication } from "@azure/msal-node";
 import { fileCachePlugin } from "./token-cache.js";
 import { resolveTokenCachePath } from "./config.js";
+import { openCommand, resolveScopes } from "./policy.js";
 import * as dotenv from "dotenv";
 import * as path from "path";
 import * as http from "http";
 import * as crypto from "crypto";
-import { exec } from "child_process";
+import { spawn } from "child_process";
 
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
@@ -16,24 +17,7 @@ const TENANT_ID = process.env.TENANT_ID ?? "common";
 const TOKEN_CACHE_PATH = resolveTokenCachePath();
 const REDIRECT_URI = "http://localhost:3000";
 
-const GRAPH_SCOPES = [
-  "User.Read",
-  "Mail.Read",
-  "Mail.ReadWrite",
-  "Mail.Send",
-  "Calendars.ReadWrite",
-  "Files.ReadWrite.All",
-  "Tasks.ReadWrite",
-  "Contacts.ReadWrite",
-  "Notes.ReadWrite",
-  "OnlineMeetings.ReadWrite",
-  "People.Read",
-  "Presence.Read",
-  "Sites.ReadWrite.All",
-  "Chat.ReadWrite",
-  "MailboxSettings.ReadWrite",
-  "offline_access",
-];
+const GRAPH_SCOPES = resolveScopes();
 
 const cachePlugin = fileCachePlugin(TOKEN_CACHE_PATH);
 
@@ -73,7 +57,13 @@ async function authenticate() {
 
   console.log("\nMicrosoft 365 — Autenticación\n");
   console.log("Abriendo navegador para login...\n");
-  exec(`open "${authUrl}"`);
+  // spawn con argv: authUrl nunca pasa por una shell (antes `exec` interpolaba).
+  const [cmd, ...args] = openCommand(authUrl);
+  spawn(cmd, args, { detached: true, stdio: "ignore" })
+    .on("error", () => {
+      // Sin navegador disponible: la URL ya se imprime arriba para abrirla a mano.
+    })
+    .unref();
   console.log("Si el navegador no se abre, ve manualmente a:\n");
   console.log(authUrl + "\n");
   console.log("Esperando que completes el login en el navegador...\n");
